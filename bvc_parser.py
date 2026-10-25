@@ -124,6 +124,7 @@ def parse_bulletin(pdf_path_or_file):
                     reste = reste + [None] * (4 - len(reste))
                     cotation.append({
                         "ISIN": cells[isin_idx],
+                        "Nb_titres": to_num(before[0]),
                         "Valeur": name,
                         "Secteur": sector,
                         "Statut": vals[statut_idx],

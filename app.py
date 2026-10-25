@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 from bvc_excel import build_workbook, bulletins_to_frames, merge_history, read_existing
+from bvc_hebdo import charger_composition, donnees_hebdo, libelle_semaine, rapport_word, semaines
 from bvc_liquidite import ajouter_feuille, liquidite
 from bvc_parser import parse_bulletin
 
@@ -90,6 +91,7 @@ h3 {{ color:{INK}; font-weight:700 !important; }}
 .foot {{ color:{MUTED}; font-size:.8rem; text-align:center; margin-top:30px; }}
 </style>
 """, unsafe_allow_html=True)
+
 
 
 # ====================================================================== utilitaires
@@ -237,11 +239,100 @@ with c2:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     st.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au {pd.Timestamp(dates[-1]):%d/%m/%Y}")
 
-tabs = st.tabs(["🗺️ Carte du marché", "📊 Marché", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
+tabs = st.tabs(["📰 Hebdo MASI 20", "🗺️ Carte du marché", "📊 Marché", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
                 "🧱 Grosses transactions", "📄 Données"])
 
-# ====================================================================== Carte du marché
+# ====================================================================== Hebdo MASI 20
 with tabs[0]:
+    compo_def = charger_composition()
+    sem = semaines(dates)
+    cles = list(sem)
+    a, b = st.columns([2, 3])
+    with a:
+        k = st.selectbox("Semaine", cles[::-1], format_func=lambda x: libelle_semaine(sem[x]))
+    with b:
+        presentes = set(vj["Valeur"])
+        membres = st.multiselect(
+            "Composition du MASI 20", sorted(presentes),
+            default=[v for v in compo_def["Valeur"] if v in presentes],
+            help="Par défaut : composition issue de la révision d'octobre 2025 (fichier masi20.csv). "
+                 "Vérifie-la après chaque révision annuelle.")
+    if len(membres) < 2:
+        st.warning("Choisis au moins deux valeurs.")
+    else:
+        compo = pd.DataFrame({"Valeur": membres}).merge(compo_def, on="Valeur", how="left")
+        i = cles.index(k)
+        try:
+            data = donnees_hebdo(h, vj, liq, compo, sem[k], sem[cles[i - 1]] if i > 0 else None)
+        except (IndexError, KeyError) as e:
+            st.error(f"Impossible de construire la revue : l'indice MASI 20 est introuvable dans les bulletins ({e}).")
+            data = None
+        if data:
+            R, T = data["resume"], data["valeurs"]
+            st.markdown('<div class="kpis">' +
+                        kpi("MASI 20", fr(R["m20_fin"], 2), pct(R["m20_var"]) + " sur la semaine",
+                            "up" if R["m20_var"] >= 0 else "dn", gold=True) +
+                        kpi("MASI", pct(R["masi_var"]), "même semaine", "up" if R["masi_var"] >= 0 else "dn") +
+                        kpi("Hausses / baisses", f"{R['hausses']} / {R['baisses']}", f"sur {len(T)} valeurs") +
+                        kpi("Volume MASI 20", mm(R["vol_m20"]), f"{fr(R['part_m20'], 0)} % du marché") +
+                        kpi("Contrôle des poids", pct(R["reconstitue"]), f"reconstitué vs {pct(R['m20_var'])} publié") +
+                        '</div>', unsafe_allow_html=True)
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown("#### L'essentiel de la semaine")
+                st.markdown("\n".join(f"- {m}" for m in R["messages"]))
+            with c2:
+                st.download_button("📄 Revue Word (A4)", data=rapport_word(data), use_container_width=True,
+                                   file_name=f"MASI20_hebdo_{R['jours'][-1]:%Y%m%d}.docx",
+                                   mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+                st.caption(R["source_poids"].capitalize() + ".")
+            a, b = st.columns(2)
+            with a:
+                st.markdown("#### Qui a fait bouger l'indice")
+                cc = T.assign(pb=T["Contribution_pct"] * 100,
+                              Volume=np.where(T["Confirme"], "Volume en hausse", "Volume stable ou en baisse"))
+                st.altair_chart(alt.Chart(cc).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+                    y=alt.Y("Valeur:N", sort="-x", title=None), x=alt.X("pb:Q", title="Contribution (points de base)"),
+                    color=alt.condition(alt.datum.pb > 0, alt.value(GREEN), alt.value(RED)),
+                    opacity=alt.Opacity("Volume:N", scale=alt.Scale(domain=["Volume en hausse", "Volume stable ou en baisse"],
+                                                                    range=[1, .4]), legend=alt.Legend(orient="bottom", title=None)),
+                    tooltip=["Valeur", alt.Tooltip("Poids_pct", title="Poids %", format=".1f"),
+                             alt.Tooltip("Var_semaine_pct", title="Var. %", format="+.2f"),
+                             alt.Tooltip("pb", title="Contribution (pb)", format="+.1f"), "Signal"]
+                ).properties(height=480), use_container_width=True)
+            with b:
+                st.markdown("#### Où va l'argent : volume et poids")
+                mx = float(max(T["Poids_pct"].max(), T["Part_volume_pct"].max()) * 1.1)
+                diag = alt.Chart(pd.DataFrame({"x": [0, mx], "y": [0, mx]})).mark_line(strokeDash=[4, 4], color="#C9D2DE").encode(
+                    x="x:Q", y="y:Q")
+                pts = alt.Chart(T.assign(Sens=np.where(T["Var_semaine_pct"] >= 0, "Hausse", "Baisse"))).mark_circle(
+                    size=110, stroke="#fff", strokeWidth=1).encode(
+                    x=alt.X("Poids_pct:Q", title="Poids dans l'indice (%)", scale=alt.Scale(domain=[0, mx])),
+                    y=alt.Y("Part_volume_pct:Q", title="Part du volume de l'indice (%)", scale=alt.Scale(domain=[0, mx])),
+                    color=alt.Color("Sens:N", scale=alt.Scale(domain=["Hausse", "Baisse"], range=[GREEN, RED]),
+                                    legend=alt.Legend(orient="bottom", title=None)),
+                    tooltip=["Valeur", alt.Tooltip("Poids_pct", title="Poids %", format=".1f"),
+                             alt.Tooltip("Part_volume_pct", title="Part du volume %", format=".1f"),
+                             alt.Tooltip("Volume_vs_poids", title="Volume / poids", format=".1f")])
+                st.altair_chart((diag + pts).properties(height=480), use_container_width=True)
+                st.caption("Au-dessus de la diagonale, la valeur attire plus d'argent que son poids dans l'indice.")
+            st.markdown("#### À surveiller")
+            st.markdown("\n".join(f"- {m}" for m in R["surveiller"]) or "Rien de particulier.")
+            with st.expander("Détail des valeurs"):
+                st.dataframe(T[["Valeur", "Secteur", "Poids_pct", "Var_semaine_pct", "Contribution_pct", "Volume_MAD",
+                                "Part_volume_pct", "Volume_vs_poids", "Tendance_volume", "Score_liquidite", "Signal"]],
+                             hide_index=True, use_container_width=True,
+                             column_config={"Poids_pct": st.column_config.NumberColumn("Poids", format="%.1f %%"),
+                                            "Var_semaine_pct": st.column_config.NumberColumn("Var.", format="%+.2f %%"),
+                                            "Contribution_pct": st.column_config.NumberColumn("Contribution", format="%+.3f %%"),
+                                            "Volume_MAD": st.column_config.NumberColumn("Volume", format="%,.0f"),
+                                            "Part_volume_pct": st.column_config.NumberColumn("Part du volume", format="%.1f %%"),
+                                            "Volume_vs_poids": st.column_config.NumberColumn("Volume / poids", format="%.1f×"),
+                                            "Tendance_volume": st.column_config.NumberColumn("Tend. vol.", format="%.2f×"),
+                                            "Score_liquidite": st.column_config.NumberColumn("Liquidité", format="%.0f")})
+
+# ====================================================================== Carte du marché
+with tabs[1]:
     a, b = st.columns([3, 1])
     with a:
         seance = st.select_slider("Séance", options=dates, value=dates[-1],
@@ -265,7 +356,7 @@ with tabs[0]:
                "Les plus grandes tuiles concentrent le volume.")
 
 # ====================================================================== Marché
-with tabs[1]:
+with tabs[2]:
     a, b = st.columns(2)
     with a:
         st.subheader("Volume du marché par séance")
@@ -304,7 +395,7 @@ with tabs[1]:
     st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
 
 # ====================================================================== Signaux
-with tabs[2]:
+with tabs[3]:
     st.subheader(f"Signaux prix / volume sur {nb} séances")
     counts = sig["Signal"].value_counts()
     emo = {"Hausse confirmée": "🟢", "Baisse sous volume": "🔴", "Hausse sans volume": "🟡",
@@ -338,7 +429,7 @@ with tabs[2]:
             "- **Flux** : ticket moyen ≥ 250 000 MAD = institutionnel, ≤ 60 000 MAD = particuliers.")
 
 # ====================================================================== Liquidité
-with tabs[3]:
+with tabs[4]:
     n_liq = min(nb_liq, len(dates))
     st.subheader(f"Score de liquidité · {n_liq} dernières séances")
     if n_liq < 20:
@@ -404,7 +495,7 @@ with tabs[3]:
             "- **Impact (Amihud)** : |variation %| ÷ volume en M MAD. *MAD pour bouger de 1 %* en est l'inverse.")
 
 # ====================================================================== Zoom valeur
-with tabs[4]:
+with tabs[5]:
     choix = st.selectbox("Valeur", sig["Valeur"].tolist())
     r = sig[sig["Valeur"] == choix].iloc[0]
     lq = liq[liq["Valeur"] == choix]
@@ -456,7 +547,7 @@ with tabs[4]:
         st.caption("Le niveau doré concentre le plus de volume : support ou résistance probable.")
 
 # ====================================================================== Blocs
-with tabs[5]:
+with tabs[6]:
     st.subheader("Grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat)")
     bp = blocs[blocs["Date"].isin(periode)]
     st.dataframe(bp, hide_index=True, use_container_width=True,
@@ -469,7 +560,7 @@ with tabs[5]:
     st.caption("Un bloc payé au-dessus de la clôture montre un acheteur décidé ; en dessous, un vendeur pressé.")
 
 # ====================================================================== Données
-with tabs[6]:
+with tabs[7]:
     st.subheader("Volumes par valeur et par séance")
     st.dataframe(vj[vj["Date"].isin(periode)], hide_index=True, use_container_width=True, height=520)
 

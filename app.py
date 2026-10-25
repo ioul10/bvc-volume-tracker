@@ -1,14 +1,124 @@
+import html
 import io
-from datetime import date
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
 
-from bvc_excel import (build_workbook, bulletins_to_frames, merge_history, read_existing)
+from bvc_excel import build_workbook, bulletins_to_frames, merge_history, read_existing
+from bvc_liquidite import ajouter_feuille, liquidite
 from bvc_parser import parse_bulletin
 
-st.set_page_config(page_title="BVC Volume Tracker", page_icon="📊", layout="wide")
+st.set_page_config(page_title="BVC Volume Tracker", page_icon="📈", layout="wide")
+
+# ====================================================================== style
+NAVY, INK, GOLD, GREEN, RED, MUTED = "#0B1F3A", "#13294B", "#C8A24A", "#12A150", "#D9483B", "#6B7A90"
+
+# Motif géométrique (étoile à 8 branches) en SVG pour le bandeau
+ZELLIGE = ("data:image/svg+xml;utf8,"
+           "<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'>"
+           "<g fill='none' stroke='%23C8A24A' stroke-opacity='0.22' stroke-width='1'>"
+           "<rect x='16' y='16' width='24' height='24'/>"
+           "<rect x='16' y='16' width='24' height='24' transform='rotate(45 28 28)'/>"
+           "<circle cx='28' cy='28' r='5'/></g></svg>")
+
+st.markdown(f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+html, body, [class*="css"], .stMarkdown, .stDataFrame, button, input {{ font-family: 'Barlow', sans-serif; }}
+.block-container {{ padding-top: 3.2rem; max-width: 1500px; }}
+[data-testid="stSidebar"] [data-testid="stFileChip"] {{ background:#1B3A66 !important; border:1px solid #2A4A78; }}
+[data-testid="stSidebar"] {{ background: {NAVY}; }}
+[data-testid="stSidebar"] * {{ color: #E8ECF3 !important; }}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {{ background: #13294B; border: 1px dashed {GOLD}; }}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {{ background:{GOLD}; color:{NAVY} !important; border:none; }}
+
+.bvc-hero {{
+  background: linear-gradient(120deg, {NAVY} 0%, #12305A 60%, #0E2748 100%), url("{ZELLIGE}");
+  background-blend-mode: normal;
+  border-radius: 14px; padding: 22px 28px 18px; color: #fff; position: relative; overflow: hidden;
+  border-bottom: 3px solid {GOLD};
+}}
+.bvc-hero::after {{ content:""; position:absolute; inset:0; background:url("{ZELLIGE}"); opacity:.9; pointer-events:none; }}
+.bvc-hero h1 {{ font-weight:700; font-size:2.1rem; margin:0; letter-spacing:.5px; color:#fff; position:relative; z-index:1; }}
+.bvc-hero h1 span {{ color:{GOLD}; }}
+.bvc-hero p {{ margin:.25rem 0 0; color:#B9C4D6; position:relative; z-index:1; font-size:1rem; }}
+.bvc-session {{ position:absolute; right:28px; top:20px; z-index:1; text-align:right; }}
+.bvc-session .lbl {{ font-size:.75rem; letter-spacing:2px; text-transform:uppercase; color:{GOLD}; }}
+.bvc-session .val {{ font-family:'JetBrains Mono', monospace; font-size:1.35rem; color:#fff; }}
+.bvc-session .dot {{ display:inline-block; width:8px; height:8px; border-radius:50%; background:{GREEN};
+                     margin-right:6px; box-shadow:0 0 0 0 rgba(18,161,80,.6); animation:pulse 2s infinite; }}
+@keyframes pulse {{ 0% {{box-shadow:0 0 0 0 rgba(18,161,80,.6);}} 70% {{box-shadow:0 0 0 10px rgba(18,161,80,0);}} 100% {{box-shadow:0 0 0 0 rgba(18,161,80,0);}} }}
+
+.bvc-ticker {{ background:#07162B; border-radius:10px; overflow:hidden; white-space:nowrap; margin:10px 0 18px;
+               border:1px solid #1C3558; }}
+.bvc-ticker .track {{ display:inline-block; padding:9px 0; animation: scroll 70s linear infinite; }}
+.bvc-ticker:hover .track {{ animation-play-state: paused; }}
+.bvc-ticker .it {{ font-family:'JetBrains Mono', monospace; font-size:.9rem; color:#DCE3EE; margin:0 22px; }}
+.bvc-ticker .nm {{ color:#fff; font-weight:600; margin-right:8px; }}
+.bvc-ticker .up {{ color:#3DDC84; }} .bvc-ticker .dn {{ color:#FF6B5E; }} .bvc-ticker .eq {{ color:#9AA8BC; }}
+@keyframes scroll {{ from {{ transform: translateX(0); }} to {{ transform: translateX(-50%); }} }}
+@media (prefers-reduced-motion: reduce) {{ .bvc-ticker .track {{ animation:none; }} }}
+
+.kpis {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(190px,1fr)); gap:12px; margin-bottom:8px; }}
+.kpi {{ background:#fff; border:1px solid #E3E8F0; border-radius:12px; padding:14px 16px; border-top:3px solid {INK}; }}
+.kpi.gold {{ border-top-color:{GOLD}; }}
+.kpi .l {{ font-size:.78rem; text-transform:uppercase; letter-spacing:1px; color:{MUTED}; }}
+.kpi .v {{ font-family:'JetBrains Mono', monospace; font-size:1.55rem; font-weight:600; color:{INK}; margin-top:4px; }}
+.kpi .s {{ font-size:.85rem; margin-top:2px; color:{MUTED}; }}
+.kpi .v.txt {{ font-family:'Barlow', sans-serif; font-size:1.25rem; }}
+.kpi .s.up {{ color:{GREEN}; }} .kpi .s.dn {{ color:{RED}; }}
+
+.heat {{ display:flex; flex-wrap:wrap; gap:4px; }}
+.tile {{ border-radius:6px; padding:8px 10px; color:#fff; min-width:110px; flex:1 1 110px; display:flex;
+         flex-direction:column; justify-content:space-between; min-height:70px; }}
+.tile.big {{ flex:2 1 220px; min-height:110px; }}
+.tile .n {{ font-weight:700; font-size:.85rem; line-height:1.1; }}
+.tile.big .n {{ font-size:1.05rem; }}
+.tile .p {{ font-family:'JetBrains Mono', monospace; font-size:.95rem; }}
+.tile.big .p {{ font-size:1.3rem; }}
+.tile .vol {{ font-size:.72rem; opacity:.85; }}
+
+.stTabs [data-baseweb="tab-list"] {{ gap:4px; border-bottom:2px solid #E3E8F0; }}
+.stTabs [data-baseweb="tab"] {{ background:#fff; border-radius:8px 8px 0 0; padding:8px 16px; font-weight:600; }}
+.stTabs [aria-selected="true"] {{ background:{NAVY}; color:#fff !important; }}
+.stTabs [aria-selected="true"] p {{ color:#fff !important; }}
+.stDownloadButton button {{ background:{GOLD}; color:{NAVY}; border:none; font-weight:700; }}
+.stDownloadButton button:hover {{ background:#B38E37; color:#fff; }}
+h3 {{ color:{INK}; font-weight:700 !important; }}
+.foot {{ color:{MUTED}; font-size:.8rem; text-align:center; margin-top:30px; }}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ====================================================================== utilitaires
+def fr(v, d=1):
+    return f"{v:,.{d}f}".replace(",", " ").replace(".", ",")
+
+
+def mm(v):
+    return fr(v / 1e6) + " M"
+
+
+def pct(v, d=2):
+    return ("+" if v > 0 else "") + fr(v, d) + " %"
+
+
+def couleur(var):
+    """Rouge -> gris -> vert selon la variation (saturée à ±4 %)."""
+    if var is None or np.isnan(var):
+        return "#5A6B82"
+    x = max(-4, min(4, var)) / 4
+    neutre = np.array([90, 107, 130])
+    cible = np.array([18, 161, 80]) if x > 0 else np.array([217, 72, 59])
+    c = neutre + (cible - neutre) * abs(x) ** 0.7
+    return "#%02x%02x%02x" % tuple(int(v) for v in c)
+
+
+def kpi(label, value, sub="", cls="", gold=False, txt=False):
+    return (f'<div class="kpi{" gold" if gold else ""}"><div class="l">{label}</div>'
+            f'<div class="v{" txt" if txt else ""}">{value}</div><div class="s {cls}">{sub}</div></div>')
 
 
 @st.cache_data(show_spinner=False)
@@ -16,31 +126,36 @@ def lire_pdf(nom, contenu):
     return parse_bulletin(io.BytesIO(contenu))
 
 
-def mm(v):
-    return f"{v / 1e6:,.1f} M".replace(",", " ").replace(".", ",")
-
-
-def m(v):
-    return mm(v) + " MAD"
-
-
-# ------------------------------------------------------------------ barre latérale
-st.sidebar.title("📥 Données")
+# ====================================================================== barre latérale
+st.sidebar.markdown("## 📥 Données")
 pdfs = st.sidebar.file_uploader("Bulletins de la cote (PDF)", type="pdf", accept_multiple_files=True)
 ancien = st.sidebar.file_uploader("Historique Excel (optionnel)", type="xlsx",
                                   help="Le fichier téléchargé la fois précédente : les nouveaux jours s'y ajoutent.")
-nb = st.sidebar.slider("Période d'analyse (séances)", 2, 20, 5)
-st.sidebar.caption("Les seuils des signaux sont réglés dans bvc_excel.py.")
+st.sidebar.markdown("## ⚙️ Réglages")
+nb = st.sidebar.slider("Période des signaux (séances)", 2, 20, 5)
+nb_liq = st.sidebar.slider("Fenêtre de liquidité (séances)", 5, 60, 20)
+st.sidebar.caption("Seuils des signaux : bvc_excel.py · poids du score de liquidité : bvc_liquidite.py")
 
-st.title("📊 BVC Volume Tracker")
-st.caption("Bourse de Casablanca · analyse des volumes à partir des bulletins de la cote")
+
+def hero(seance=None):
+    right = ""
+    if seance is not None:
+        right = (f'<div class="bvc-session"><div class="lbl">Dernière séance</div>'
+                 f'<div class="val"><span class="dot"></span>{pd.Timestamp(seance):%d/%m/%Y}</div></div>')
+    st.markdown(f"""<div class="bvc-hero">{right}
+      <h1>BVC <span>Volume</span> Tracker</h1>
+      <p>Volumes, signaux et liquidité · Bourse de Casablanca · d'après les bulletins de la cote</p>
+    </div>""", unsafe_allow_html=True)
+
 
 if not pdfs and not ancien:
-    st.info("Dépose un ou plusieurs bulletins PDF (BCFR_AAAAMMJJ.pdf) dans la barre de gauche. "
-            "Tu peux aussi ajouter l'Excel produit la fois précédente pour continuer l'historique.")
+    hero()
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.info("👈 Dépose un ou plusieurs bulletins PDF (BCFR_AAAAMMJJ.pdf) dans la barre de gauche. "
+            "Ajoute l'Excel de la fois précédente pour continuer ton historique.")
     st.stop()
 
-# ------------------------------------------------------------------ lecture
+# ====================================================================== lecture
 resultats, controles = [], []
 with st.spinner("Lecture des bulletins…"):
     for f in pdfs or []:
@@ -55,88 +170,157 @@ with st.spinner("Lecture des bulletins…"):
         except Exception as e:  # noqa: BLE001
             controles.append({"Fichier": f.name, "Contrôle": f"❌ Illisible : {e}"})
 
-historique = read_existing(ancien) if ancien else {}
-h = merge_history(historique, bulletins_to_frames(resultats) if resultats else {})
-
+h = merge_history(read_existing(ancien) if ancien else {}, bulletins_to_frames(resultats) if resultats else {})
 if h.get("Marche") is None or h["Marche"].empty:
+    hero()
     st.error("Aucune séance exploitable.")
     st.stop()
 
+dates = sorted(h["Marche"]["Date"].unique())
+nb = min(nb, len(dates))
+xlsx, t = build_workbook(h, nb)
+vj, sig, blocs = t["volumes_jour"], t["signaux"], t["blocs"]
+liq, liq_m = liquidite(h, vj, nb_liq)
+xlsx = ajouter_feuille(xlsx, liq)
+
+periode = dates[-nb:]
+mk = h["Marche"].sort_values("Date")
+mk_p = mk[mk["Date"].isin(periode)]
+last = vj[vj["Date"] == dates[-1]]
+
+# ====================================================================== en-tête + bandeau
+hero(dates[-1])
+tick = last[last["Volume_MAD"] > 0].sort_values("Volume_MAD", ascending=False)
+items = "".join(
+    f'<span class="it"><span class="nm">{html.escape(r.Valeur)}</span>{fr(r.Cloture, 2)} '
+    f'<span class="{"up" if r.Var_pct > 0 else "dn" if r.Var_pct < 0 else "eq"}">'
+    f'{"▲" if r.Var_pct > 0 else "▼" if r.Var_pct < 0 else "■"} {pct(r.Var_pct)}</span></span>'
+    for r in tick.itertuples())
+masi_last = mk.iloc[-1]
+items = (f'<span class="it"><span class="nm">MASI</span>{fr(masi_last.MASI, 2)} '
+         f'<span class="{"up" if masi_last.MASI_var_pct >= 0 else "dn"}">{pct(masi_last.MASI_var_pct)}</span></span>') + items
+st.markdown(f'<div class="bvc-ticker"><div class="track">{items}{items}</div></div>', unsafe_allow_html=True)
+
 if controles:
-    with st.expander(f"Contrôle de lecture ({len(controles)} fichier(s))",
-                     expanded=any("OK" not in str(c.get("Contrôle")) for c in controles)):
+    ok = all("OK" in str(c.get("Contrôle")) for c in controles)
+    with st.expander(f"{'✅' if ok else '⚠️'} Contrôle de lecture · {len(controles)} fichier(s)", expanded=not ok):
         st.dataframe(pd.DataFrame(controles), hide_index=True, use_container_width=True,
                      column_config={"Volume lu": st.column_config.NumberColumn(format="%.2f"),
                                     "Volume officiel": st.column_config.NumberColumn(format="%.2f")})
 
-nb = min(nb, h["Marche"]["Date"].nunique())
-xlsx, t = build_workbook(h, nb)
-vj, sig, blocs = t["volumes_jour"], t["signaux"], t["blocs"]
-
-dates = sorted(h["Marche"]["Date"].unique())
-periode = dates[-nb:]
-mk = h["Marche"].sort_values("Date")
-mk_p = mk[mk["Date"].isin(periode)]
-
-st.download_button("⬇️ Télécharger l'Excel", data=xlsx, type="primary",
-                   file_name=f"bvc_volumes_{pd.Timestamp(dates[-1]).strftime('%Y%m%d')}.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption(f"Historique : {len(dates)} séance(s), du {pd.Timestamp(dates[0]):%d/%m/%Y} au {pd.Timestamp(dates[-1]):%d/%m/%Y}. "
-           f"Analyse sur les {nb} dernières.")
-
-# ------------------------------------------------------------------ chiffres clés
+# ====================================================================== chiffres clés
 masi_debut = mk_p["MASI"].iloc[0] / (1 + mk_p["MASI_var_pct"].iloc[0] / 100)
 masi_var = (mk_p["MASI"].iloc[-1] / masi_debut - 1) * 100
 moy = mk_p["Volume_MAD"].mean()
+dern = mk_p["Volume_MAD"].iloc[-1]
 top5 = sig["Part_periode_pct"].head(5).sum() if not sig.empty else 0
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Volume de la période (MAD)", mm(mk_p["Volume_MAD"].sum()))
-c2.metric("Moyenne par séance (MAD)", mm(moy))
-c3.metric("Dernière séance (MAD)", mm(mk_p["Volume_MAD"].iloc[-1]), f"{(mk_p['Volume_MAD'].iloc[-1] / moy - 1) * 100:+.0f} % vs moyenne")
-c4.metric("Part des 5 premières valeurs", f"{top5:.0f} %")
-c5.metric("MASI", f"{mk_p['MASI'].iloc[-1]:,.2f}".replace(",", " "), f"{masi_var:+.2f} % sur la période")
+hausse = int((last["Var_pct"] > 0).sum())
+baisse = int((last["Var_pct"] < 0).sum())
+lm = liq_m.iloc[-1]
+c1, c2 = st.columns([5, 1])
+with c1:
+    st.markdown('<div class="kpis">' +
+                kpi(f"Volume · {nb} séances", mm(mk_p["Volume_MAD"].sum()), "MAD", gold=True) +
+                kpi("Moyenne / séance", mm(moy), "MAD") +
+                kpi("Dernière séance", mm(dern), pct((dern / moy - 1) * 100, 0) + " vs moyenne",
+                    "up" if dern >= moy else "dn") +
+                kpi("MASI", fr(mk_p["MASI"].iloc[-1], 2), pct(masi_var) + f" sur {nb} séances",
+                    "up" if masi_var >= 0 else "dn") +
+                kpi("Hausses / baisses", f"{hausse} / {baisse}", "dernière séance") +
+                kpi("Concentration", f"{fr(top5, 0)} %", "du volume sur 5 valeurs") +
+                kpi("Volume hors blocs", f"{fr(lm.Volume_fond / lm.Volume_total * 100 if lm.Volume_total else 0, 0)} %",
+                    "dernière séance") +
+                '</div>', unsafe_allow_html=True)
+with c2:
+    st.download_button("⬇️ Excel", data=xlsx, use_container_width=True,
+                       file_name=f"bvc_volumes_{pd.Timestamp(dates[-1]):%Y%m%d}.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au {pd.Timestamp(dates[-1]):%d/%m/%Y}")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Marché", "Signaux", "Zoom valeur", "Grosses transactions", "Données"])
+tabs = st.tabs(["🗺️ Carte du marché", "📊 Marché", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
+                "🧱 Grosses transactions", "📄 Données"])
 
-# ------------------------------------------------------------------ Marché
-with tab1:
+# ====================================================================== Carte du marché
+with tabs[0]:
+    a, b = st.columns([3, 1])
+    with a:
+        seance = st.select_slider("Séance", options=dates, value=dates[-1],
+                                  format_func=lambda d: pd.Timestamp(d).strftime("%a %d/%m"))
+    with b:
+        mode = st.radio("Taille des tuiles", ["Volume", "Uniforme"], horizontal=True)
+    j = vj[(vj["Date"] == seance) & (vj["Volume_MAD"] > 0)].sort_values("Volume_MAD", ascending=False)
+    tot = j["Volume_MAD"].sum()
+    tiles = []
+    for i, r in enumerate(j.itertuples()):
+        big = mode == "Volume" and i < 8
+        grow = max(1, round(r.Volume_MAD / tot * 40)) if mode == "Volume" else 1
+        tiles.append(
+            f'<div class="tile{" big" if big else ""}" style="background:{couleur(r.Var_pct)};flex-grow:{grow}" '
+            f'title="{html.escape(r.Valeur)} · clôture {fr(r.Cloture, 2)} · {r.Contrats:.0f} contrats">'
+            f'<div class="n">{html.escape(r.Valeur)}</div><div class="p">{pct(r.Var_pct)}</div>'
+            f'<div class="vol">{mm(r.Volume_MAD)} MAD · {fr(r.Volume_MAD / tot * 100, 1)} %</div></div>')
+    st.markdown(f'<div class="heat">{"".join(tiles)}</div>', unsafe_allow_html=True)
+    nt = int((vj["Date"] == seance).sum() - len(j))
+    st.caption(f"{len(j)} valeurs traitées, {nt} non traitées. Couleur = variation du jour (saturée à ±4 %). "
+               "Les plus grandes tuiles concentrent le volume.")
+
+# ====================================================================== Marché
+with tabs[1]:
     a, b = st.columns(2)
     with a:
         st.subheader("Volume du marché par séance")
-        d = mk_p.assign(Volume_M=mk_p["Volume_MAD"] / 1e6, Seance=mk_p["Date"].dt.strftime("%d/%m"))
-        bars = alt.Chart(d).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-            x=alt.X("Seance:N", title=None, sort=None), y=alt.Y("Volume_M:Q", title="M MAD"),
-            tooltip=[alt.Tooltip("Seance", title="Séance"), alt.Tooltip("Volume_M", title="Volume (M MAD)", format=",.1f"),
-                     alt.Tooltip("Contrats", format=","), alt.Tooltip("MASI_var_pct", title="MASI (%)", format="+.2f")])
-        st.altair_chart(bars + bars.mark_text(dy=-8).encode(text=alt.Text("Volume_M:Q", format=",.1f")),
-                        use_container_width=True)
+        lm_p = liq_m[liq_m["Date"].isin(periode)].copy()
+        lm_p["Seance"] = lm_p["Date"].dt.strftime("%d/%m")
+        long = lm_p.melt(id_vars=["Seance"], value_vars=["Volume_fond", "Volume_blocs"], var_name="Type", value_name="v")
+        long["Type"] = long["Type"].map({"Volume_fond": "Volume de fond", "Volume_blocs": "Grosses transactions"})
+        long["M"] = long["v"] / 1e6
+        st.altair_chart(alt.Chart(long).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            x=alt.X("Seance:N", title=None, sort=None), y=alt.Y("sum(M):Q", title="M MAD"),
+            color=alt.Color("Type:N", scale=alt.Scale(domain=["Volume de fond", "Grosses transactions"], range=[INK, GOLD]), legend=alt.Legend(orient="top", title=None)),
+            tooltip=["Seance", "Type", alt.Tooltip("M", title="M MAD", format=",.1f")]), use_container_width=True)
     with b:
-        st.subheader("Où est allé l'argent")
-        top = sig.head(12)
-        day_cols = [c for c in sig.columns if "/" in str(c)]
-        long = top.melt(id_vars="Valeur", value_vars=day_cols, var_name="Séance", value_name="Volume")
-        long["Volume_M"] = long["Volume"] / 1e6
-        st.altair_chart(alt.Chart(long).mark_bar().encode(
-            y=alt.Y("Valeur:N", sort=list(top["Valeur"]), title=None),
-            x=alt.X("sum(Volume_M):Q", title="M MAD"),
-            color=alt.Color("Séance:N", sort=day_cols),
-            order=alt.Order("Séance:N"),
-            tooltip=["Valeur", "Séance", alt.Tooltip("Volume_M", title="M MAD", format=",.1f")]),
-            use_container_width=True)
-        st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
+        st.subheader("MASI et volume")
+        mk_p2 = mk_p.assign(Seance=mk_p["Date"].dt.strftime("%d/%m"), M=mk_p["Volume_MAD"] / 1e6)
+        base = alt.Chart(mk_p2).encode(x=alt.X("Seance:N", title=None, sort=None))
+        st.altair_chart(alt.layer(
+            base.mark_bar(color="#D5DDE8", cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(y=alt.Y("M:Q", title="Volume (M MAD)")),
+            base.mark_line(color=GOLD, strokeWidth=3, point=alt.OverlayMarkDef(color=GOLD, size=60)).encode(
+                y=alt.Y("MASI:Q", scale=alt.Scale(zero=False), title="MASI"),
+                tooltip=["Seance", alt.Tooltip("MASI", format=",.2f"), alt.Tooltip("MASI_var_pct", title="Var. %", format="+.2f"),
+                         alt.Tooltip("M", title="Volume M MAD", format=",.1f")])
+        ).resolve_scale(y="independent"), use_container_width=True)
+    st.subheader("Où est allé l'argent")
+    top = sig.head(15)
+    day_cols = [c for c in sig.columns if "/" in str(c)]
+    long = top.melt(id_vars="Valeur", value_vars=day_cols, var_name="Séance", value_name="Volume")
+    long["M"] = long["Volume"] / 1e6
+    st.altair_chart(alt.Chart(long).mark_bar().encode(
+        y=alt.Y("Valeur:N", sort=list(top["Valeur"]), title=None),
+        x=alt.X("sum(M):Q", title="M MAD"),
+        color=alt.Color("Séance:N", sort=day_cols, legend=alt.Legend(orient="top")),
+        order=alt.Order("Séance:N"),
+        tooltip=["Valeur", "Séance", alt.Tooltip("M", title="M MAD", format=",.1f")]).properties(height=420),
+        use_container_width=True)
+    st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
 
-# ------------------------------------------------------------------ Signaux
-with tab2:
+# ====================================================================== Signaux
+with tabs[2]:
     st.subheader(f"Signaux prix / volume sur {nb} séances")
+    counts = sig["Signal"].value_counts()
+    emo = {"Hausse confirmée": "🟢", "Baisse sous volume": "🔴", "Hausse sans volume": "🟡",
+           "Baisse sans volume": "🟠", "Absorption": "🔵"}
+    st.markdown(" &nbsp; ".join(f"{emo.get(k, '⚪')} **{k}** : {v}" for k, v in counts.items()))
     filtre = st.multiselect("Filtrer par signal", sorted(sig["Signal"].unique()))
     s = sig[sig["Signal"].isin(filtre)] if filtre else sig
+    s = s.assign(Signal=s["Signal"].map(lambda x: f"{emo.get(x, '⚪')} {x}"))
     st.dataframe(
         s[["Valeur", "Secteur", "Volume_periode_MAD", "Part_periode_pct", "Var_periode_pct", "Tendance_volume",
            "Pic_vs_mediane", "Ratio_dernier_jour_vs_moy20", "Ticket_moyen", "Flux", "Signal"]],
         hide_index=True, use_container_width=True, height=520,
         column_config={
             "Volume_periode_MAD": st.column_config.NumberColumn("Volume (MAD)", format="%,.0f"),
-            "Part_periode_pct": st.column_config.NumberColumn("Part", format="%.1f %%"),
+            "Part_periode_pct": st.column_config.ProgressColumn("Part", format="%.1f %%", min_value=0,
+                                                                 max_value=float(max(1, sig["Part_periode_pct"].max()))),
             "Var_periode_pct": st.column_config.NumberColumn("Var. période", format="%+.1f %%"),
             "Tendance_volume": st.column_config.NumberColumn("Tendance vol.", format="%.2f×"),
             "Pic_vs_mediane": st.column_config.NumberColumn("Pic", format="%.1f×"),
@@ -145,42 +329,112 @@ with tab2:
         })
     with st.expander("Comment lire les signaux"):
         st.markdown(
-            "- **Hausse confirmée** : le cours monte (≥ +2 %) et le volume augmente (≥ +20 %).\n"
-            "- **Hausse sans volume** : le cours monte mais l'activité baisse, la hausse est fragile.\n"
-            "- **Baisse sous volume** : le cours baisse et le volume grossit, pression vendeuse réelle.\n"
-            "- **Absorption** : gros volume (≥ 20 M MAD) et prix quasi immobile (< 1 %).\n"
+            "- 🟢 **Hausse confirmée** : le cours monte (≥ +2 %) et le volume augmente (≥ +20 %).\n"
+            "- 🟡 **Hausse sans volume** : le cours monte mais l'activité baisse, la hausse est fragile.\n"
+            "- 🔴 **Baisse sous volume** : le cours baisse et le volume grossit, pression vendeuse réelle.\n"
+            "- 🔵 **Absorption** : gros volume (≥ 20 M MAD) et prix quasi immobile (< 1 %).\n"
             "- **Tendance vol.** : moyenne de la 2ᵉ moitié de la période ÷ moyenne de la 1ʳᵉ moitié.\n"
-            "- **Pic** : plus forte séance ÷ séance médiane. **Dernier jour / moy. 20** : volume du dernier jour "
-            "÷ moyenne des 20 séances précédentes (fiable à partir de ~20 séances d'historique).\n"
+            "- **Pic** : plus forte séance ÷ séance médiane. **Dernier jour / moy. 20** : fiable à partir de ~20 séances.\n"
             "- **Flux** : ticket moyen ≥ 250 000 MAD = institutionnel, ≤ 60 000 MAD = particuliers.")
 
-# ------------------------------------------------------------------ Zoom valeur
-with tab3:
+# ====================================================================== Liquidité
+with tabs[3]:
+    n_liq = min(nb_liq, len(dates))
+    st.subheader(f"Score de liquidité · {n_liq} dernières séances")
+    if n_liq < 20:
+        st.warning(f"Seulement {n_liq} séance(s) d'historique : le score se stabilise à partir de 20 séances.")
+    classes = liq["Classe"].value_counts()
+    st.markdown('<div class="kpis">' +
+                kpi("Très liquides", str(classes.get("Très liquide", 0)), "score ≥ 75", gold=True) +
+                kpi("Liquides", str(classes.get("Liquide", 0)), "score 50 à 75") +
+                kpi("Peu liquides", str(classes.get("Peu liquide", 0)), "score 25 à 50") +
+                kpi("Illiquides", str(classes.get("Illiquide", 0)), "score < 25") +
+                kpi("Largeur du marché", f"{fr(lm.Largeur_pct, 0)} %", "des valeurs traitées, dernière séance") +
+                '</div>', unsafe_allow_html=True)
+    a, b = st.columns([3, 2])
+    with a:
+        st.dataframe(
+            liq[["Rang", "Valeur", "Secteur", "Score", "Classe", "Volume_fond_median", "Frequence_pct",
+                 "Ecart_median_pct", "Amihud_median", "MAD_pour_1pct_impact", "Part_blocs_pct"]],
+            hide_index=True, use_container_width=True, height=560,
+            column_config={
+                "Score": st.column_config.ProgressColumn("Score", format="%.0f", min_value=0, max_value=100),
+                "Volume_fond_median": st.column_config.NumberColumn("Volume de fond / jour", format="%,.0f"),
+                "Frequence_pct": st.column_config.NumberColumn("Fréquence", format="%.0f %%"),
+                "Ecart_median_pct": st.column_config.NumberColumn("Écart achat/vente", format="%.2f %%"),
+                "Amihud_median": st.column_config.NumberColumn("Impact (% / M MAD)", format="%.3f"),
+                "MAD_pour_1pct_impact": st.column_config.NumberColumn("MAD pour bouger de 1 %", format="%,.0f"),
+                "Part_blocs_pct": st.column_config.NumberColumn("Part des blocs", format="%.0f %%"),
+            })
+    with b:
+        sc = liq.dropna(subset=["Amihud_median"])
+        sc = sc[(sc["Volume_fond_median"] > 0) & (sc["Amihud_median"] > 0)]
+        st.altair_chart(alt.Chart(sc).mark_circle(size=90, opacity=.85, stroke="#fff", strokeWidth=1).encode(
+            x=alt.X("Volume_fond_median:Q", scale=alt.Scale(type="log"), title="Volume de fond / jour (MAD, log)"),
+            y=alt.Y("Amihud_median:Q", scale=alt.Scale(type="log", reverse=True), title="Impact prix (log, haut = faible)"),
+            color=alt.Color("Classe:N", scale=alt.Scale(domain=["Très liquide", "Liquide", "Peu liquide", "Illiquide"],
+                                                        range=[GREEN, "#3E7CB1", GOLD, RED]),
+                            legend=alt.Legend(orient="bottom", title=None)),
+            tooltip=["Valeur", alt.Tooltip("Score", format=".0f"), alt.Tooltip("Volume_fond_median", title="Volume de fond", format=",.0f"),
+                     alt.Tooltip("Amihud_median", title="Impact", format=".3f"),
+                     alt.Tooltip("MAD_pour_1pct_impact", title="MAD pour 1 %", format=",.0f")]
+        ).properties(height=430, title="Volume et impact"), use_container_width=True)
+        st.caption("En haut à droite : beaucoup de volume et peu d'impact, c'est-à-dire facile à traiter. "
+                   "En bas à gauche : un petit montant suffit à faire bouger le cours.")
+    st.subheader("Liquidité du marché séance par séance")
+    lmm = liq_m.assign(Seance=liq_m["Date"].dt.strftime("%d/%m"))
+    base = alt.Chart(lmm).encode(x=alt.X("Seance:N", sort=None, title=None))
+    st.altair_chart(alt.layer(
+        base.mark_bar(color=INK, opacity=.85, cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+            y=alt.Y("Volume_fond:Q", title="Volume de fond (MAD)", axis=alt.Axis(format="~s"))),
+        base.mark_line(color=GOLD, strokeWidth=3, point=True).encode(
+            y=alt.Y("Largeur_pct:Q", title="Valeurs traitées (%)", scale=alt.Scale(domain=[0, 100])),
+            tooltip=["Seance", alt.Tooltip("Volume_fond", title="Volume de fond", format=",.0f"),
+                     alt.Tooltip("Valeurs_traitees", title="Valeurs traitées"),
+                     alt.Tooltip("Ecart_median_pct", title="Écart médian %", format=".2f")])
+    ).resolve_scale(y="independent").properties(height=280), use_container_width=True)
+    with st.expander("Comment est construit le score"):
+        st.markdown(
+            "Chaque valeur est classée en percentile sur quatre mesures (médianes sur la fenêtre), puis :\n\n"
+            "**Score = 30 % volume de fond + 20 % fréquence + 20 % écart achat/vente + 30 % impact**\n\n"
+            "- **Volume de fond** : volume du jour hors grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat).\n"
+            "- **Fréquence** : part des séances où la valeur a été traitée.\n"
+            "- **Écart achat/vente** : (meilleure offre − meilleure demande) / milieu, à la clôture. "
+            "C'est une photo prise après la séance, d'où son poids modéré.\n"
+            "- **Impact (Amihud)** : |variation %| ÷ volume en M MAD. *MAD pour bouger de 1 %* en est l'inverse.")
+
+# ====================================================================== Zoom valeur
+with tabs[4]:
     choix = st.selectbox("Valeur", sig["Valeur"].tolist())
     r = sig[sig["Valeur"] == choix].iloc[0]
-    st.markdown(f"**{choix}** · {m(r['Volume_periode_MAD'])} · {r['Var_periode_pct']:+.1f} % · "
-                f"ticket moyen {r['Ticket_moyen'] / 1e3:,.0f} k MAD · **{r['Signal']}**")
+    lq = liq[liq["Valeur"] == choix]
+    st.markdown('<div class="kpis">' +
+                kpi("Volume période", mm(r["Volume_periode_MAD"]), "MAD", gold=True) +
+                kpi("Variation", pct(r["Var_periode_pct"], 1), f"sur {nb} séances",
+                    "up" if r["Var_periode_pct"] >= 0 else "dn") +
+                kpi("Ticket moyen", fr(r["Ticket_moyen"] / 1e3, 0) + " k", r["Flux"]) +
+                kpi("Signal", r["Signal"], "", txt=True) +
+                (kpi("Liquidité", fr(lq["Score"].iloc[0], 0) + " / 100", lq["Classe"].iloc[0]) if len(lq) else "") +
+                '</div>', unsafe_allow_html=True)
     a, b = st.columns(2)
     with a:
         st.subheader("Prix et volume")
         d = vj[(vj["Valeur"] == choix) & (vj["Date"].isin(periode))].copy()
         d["Seance"] = d["Date"].dt.strftime("%d/%m")
-        d["Volume_M"] = d["Volume_MAD"] / 1e6
+        d["M"] = d["Volume_MAD"] / 1e6
         base = alt.Chart(d).encode(x=alt.X("Seance:N", title=None, sort=None))
-        vol = base.mark_bar(opacity=0.6, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-            y=alt.Y("Volume_M:Q", title="Volume (M MAD)"))
+        vol = base.mark_bar(color="#C9D3E0", cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+            y=alt.Y("M:Q", title="Volume (M MAD)"))
         pmin, pmax = d[["Cloture", "VWAP"]].min().min(), d[["Cloture", "VWAP"]].max().max()
-        sc = alt.Scale(domain=[pmin * 0.99, pmax * 1.01])
-        close = base.mark_line(point=True, color="#E4572E", strokeWidth=2).encode(
-            y=alt.Y("Cloture:Q", title="Cours", scale=sc),
+        scl = alt.Scale(domain=[pmin * 0.99, pmax * 1.01])
+        close = base.mark_line(color=GOLD, strokeWidth=3, point=alt.OverlayMarkDef(color=GOLD, size=60)).encode(
+            y=alt.Y("Cloture:Q", title="Cours", scale=scl),
             tooltip=[alt.Tooltip("Seance", title="Séance"), alt.Tooltip("Cloture", title="Clôture", format=",.2f"),
-                     alt.Tooltip("VWAP", format=",.2f"), alt.Tooltip("Volume_M", title="Volume (M MAD)", format=",.1f"),
+                     alt.Tooltip("VWAP", format=",.2f"), alt.Tooltip("M", title="Volume (M MAD)", format=",.1f"),
                      alt.Tooltip("Contrats", format=",")])
-        vwap = base.mark_tick(color="#555", thickness=2, size=30).encode(y=alt.Y("VWAP:Q", scale=sc))
-        st.altair_chart(alt.layer(vol, alt.layer(close, vwap)).resolve_scale(y="independent"),
-                        use_container_width=True)
-        st.caption("Barres : volume · ligne : clôture · trait gris : VWAP du jour. "
-                   "Clôture au-dessus du VWAP = les acheteurs ont fini plus forts.")
+        vwap = base.mark_tick(color=INK, thickness=2, size=30).encode(y=alt.Y("VWAP:Q", scale=scl))
+        st.altair_chart(alt.layer(vol, alt.layer(close, vwap)).resolve_scale(y="independent"), use_container_width=True)
+        st.caption("Barres : volume · ligne dorée : clôture · trait bleu : VWAP du jour.")
     with b:
         st.subheader("Profil de volume par prix")
         p = h["Physionomie"]
@@ -193,25 +447,32 @@ with tab3:
         else:
             prof = p.groupby("Prix", as_index=False)["Volume_MAD"].sum()
             prof["Prix"] = prof["Prix"].map(lambda x: f"{x:,.2f}")
-        prof["Volume_M"] = prof["Volume_MAD"] / 1e6
-        st.altair_chart(alt.Chart(prof).mark_bar().encode(
-            y=alt.Y("Prix:N", sort="descending", title=None), x=alt.X("Volume_M:Q", title="M MAD"),
-            tooltip=["Prix", alt.Tooltip("Volume_M", title="M MAD", format=",.2f")]), use_container_width=True)
-        st.caption("Les niveaux les plus chargés servent souvent de support ou de résistance.")
+        prof["M"] = prof["Volume_MAD"] / 1e6
+        prof["Niveau"] = np.where(prof["M"] == prof["M"].max(), "Le plus chargé", "Autres")
+        st.altair_chart(alt.Chart(prof).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+            y=alt.Y("Prix:N", sort="descending", title=None), x=alt.X("M:Q", title="M MAD"),
+            color=alt.Color("Niveau:N", scale=alt.Scale(domain=["Le plus chargé", "Autres"], range=[GOLD, INK]), legend=None),
+            tooltip=["Prix", alt.Tooltip("M", title="M MAD", format=",.2f")]), use_container_width=True)
+        st.caption("Le niveau doré concentre le plus de volume : support ou résistance probable.")
 
-# ------------------------------------------------------------------ Blocs
-with tab4:
+# ====================================================================== Blocs
+with tabs[5]:
     st.subheader("Grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat)")
     bp = blocs[blocs["Date"].isin(periode)]
     st.dataframe(bp, hide_index=True, use_container_width=True,
                  column_config={"Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
                                 "Volume_MAD": st.column_config.NumberColumn(format="%,.0f"),
                                 "MAD_par_contrat": st.column_config.NumberColumn(format="%,.0f"),
-                                "Part_du_jour_pct": st.column_config.NumberColumn(format="%.0f %%"),
+                                "Part_du_jour_pct": st.column_config.ProgressColumn("Part du jour", format="%.0f %%",
+                                                                                     min_value=0, max_value=100),
                                 "Prix_vs_cloture_pct": st.column_config.NumberColumn(format="%+.2f %%")})
     st.caption("Un bloc payé au-dessus de la clôture montre un acheteur décidé ; en dessous, un vendeur pressé.")
 
-# ------------------------------------------------------------------ Données
-with tab5:
+# ====================================================================== Données
+with tabs[6]:
     st.subheader("Volumes par valeur et par séance")
     st.dataframe(vj[vj["Date"].isin(periode)], hide_index=True, use_container_width=True, height=520)
+
+st.markdown('<div class="foot">Outil indépendant, non affilié à la Bourse de Casablanca. '
+            'Données issues des bulletins de la cote publics. Ne constitue pas un conseil en investissement.</div>',
+            unsafe_allow_html=True)

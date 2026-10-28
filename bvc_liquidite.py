@@ -71,12 +71,17 @@ def liquidite(h, vj, nb_seances=20):
     g["MAD_pour_1pct_impact"] = np.where(g["Amihud_median"] > 0, 1e6 / g["Amihud_median"], np.nan)
 
     # Rangs en percentile (100 = le plus liquide). Valeur manquante = la pire note.
-    r_vol = g["Volume_fond_median"].rank(pct=True)
-    r_freq = g["Frequence_pct"].rank(pct=True)
-    r_ecart = (-g["Ecart_median_pct"]).rank(pct=True).fillna(0)
-    r_impact = (-g["Amihud_median"]).rank(pct=True).fillna(0)
-    g["Score"] = 100 * (POIDS["volume"] * r_vol + POIDS["frequence"] * r_freq
-                        + POIDS["ecart"] * r_ecart + POIDS["impact"] * r_impact)
+    # method="max" : des valeurs à égalité reçoivent la meilleure note (ex. 100 % de régularité = 20/20)
+    r_vol = g["Volume_fond_median"].rank(pct=True, method="max")
+    r_freq = g["Frequence_pct"].rank(pct=True, method="max")
+    r_ecart = (-g["Ecart_median_pct"]).rank(pct=True, method="max").fillna(0)
+    r_impact = (-g["Amihud_median"]).rank(pct=True, method="max").fillna(0)
+    # Points de chaque ingrédient (le total fait le score sur 100)
+    g["Pts_volume"] = 100 * POIDS["volume"] * r_vol
+    g["Pts_frequence"] = 100 * POIDS["frequence"] * r_freq
+    g["Pts_ecart"] = 100 * POIDS["ecart"] * r_ecart
+    g["Pts_impact"] = 100 * POIDS["impact"] * r_impact
+    g["Score"] = g[["Pts_volume", "Pts_frequence", "Pts_ecart", "Pts_impact"]].sum(axis=1)
     g["Classe"] = g["Score"].apply(_classe)
     g = g.drop(columns=["Volume_total"]).sort_values("Score", ascending=False).reset_index(drop=True)
     g.insert(0, "Rang", range(1, len(g) + 1))
@@ -92,6 +97,15 @@ def liquidite(h, vj, nb_seances=20):
     ).reset_index()
     marche["Largeur_pct"] = marche["Valeurs_traitees"] / marche["Valeurs_cotees"] * 100
     return g, marche
+
+
+def volume_fond_jour(h, dates=None):
+    """Volume hors grosses transactions, par valeur et par séance."""
+    phy = h["Physionomie"]
+    if dates is not None:
+        phy = phy[phy["Date"].isin(dates)]
+    bloc = (phy["Volume_MAD"] >= BLOC_VOLUME_MIN) & (phy["Volume_MAD"] / phy["Contrats"] >= BLOC_PAR_CONTRAT_MIN)
+    return phy[~bloc].groupby(["Date", "Valeur"])["Volume_MAD"].sum().rename("Volume_fond").reset_index()
 
 
 def ajouter_feuille(xlsx_bytes, df, nom="Liquidite"):

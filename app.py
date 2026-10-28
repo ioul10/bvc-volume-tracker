@@ -8,6 +8,8 @@ import streamlit as st
 
 from bvc_excel import build_workbook, bulletins_to_frames, merge_history, read_existing
 from bvc_hebdo import charger_composition, donnees_hebdo, libelle_semaine, rapport_word, semaines
+from bvc_indices import (INDICES, composition, lecture, liquidite_indice, serie, tendance_liquidite,
+                         variation_semaine, volume_indice)
 from bvc_liquidite import ajouter_feuille, liquidite
 from bvc_parser import parse_bulletin
 
@@ -88,6 +90,29 @@ html, body, [class*="css"], .stMarkdown, .stDataFrame, button, input {{ font-fam
 .stDownloadButton button {{ background:{GOLD}; color:{NAVY}; border:none; font-weight:700; }}
 .stDownloadButton button:hover {{ background:#B38E37; color:#fff; }}
 h3 {{ color:{INK}; font-weight:700 !important; }}
+.idx {{ background:#fff; border:1px solid #E3E8F0; border-radius:14px; padding:16px 18px 10px; border-top:4px solid {NAVY}; }}
+.idx.m20 {{ border-top-color:{GOLD}; }}
+.idx .nm {{ font-weight:700; font-size:1.15rem; color:{INK}; letter-spacing:.5px; }}
+.idx .ds {{ font-size:.8rem; color:{MUTED}; margin-bottom:6px; }}
+.idx .lv {{ font-family:'JetBrains Mono', monospace; font-size:2rem; font-weight:600; color:{INK}; }}
+.idx .vr {{ display:flex; gap:14px; flex-wrap:wrap; font-size:.85rem; color:{MUTED}; margin-top:2px; }}
+.idx .vr b {{ font-family:'JetBrains Mono', monospace; font-weight:600; }}
+.up-t {{ color:{GREEN}; }} .dn-t {{ color:{RED}; }}
+.liq {{ background:#F7F9FC; border:1px solid #E3E8F0; border-radius:12px; padding:12px 16px; margin-top:6px; }}
+.liq .t {{ font-size:.75rem; text-transform:uppercase; letter-spacing:1px; color:{MUTED}; }}
+.liq .sc {{ font-family:'JetBrains Mono', monospace; font-size:1.6rem; font-weight:600; color:{INK}; }}
+.liq .cl {{ font-size:.85rem; font-weight:600; margin-left:6px; }}
+.gauge {{ height:8px; border-radius:6px; background:#E3E8F0; margin:6px 0 10px; overflow:hidden; }}
+.gauge i {{ display:block; height:100%; border-radius:6px; }}
+.liq .row {{ display:flex; justify-content:space-between; gap:8px; font-size:.85rem; color:{INK}; padding:3px 0;
+             border-top:1px dashed #E3E8F0; }}
+.liq .row span:last-child {{ font-family:'JetBrains Mono', monospace; font-weight:600; text-align:right; }}
+.verdict {{ border-radius:12px; padding:14px 18px; border-left:6px solid; background:#fff; border:1px solid #E3E8F0; }}
+.verdict.ok {{ border-left:6px solid {GREEN}; }} .verdict.bad {{ border-left:6px solid {RED}; }}
+.verdict.warn {{ border-left:6px solid {GOLD}; }} .verdict.neutre {{ border-left:6px solid {MUTED}; }}
+.verdict .k {{ font-size:.75rem; text-transform:uppercase; letter-spacing:1px; color:{MUTED}; }}
+.verdict .h {{ font-size:1.25rem; font-weight:700; color:{INK}; margin:2px 0; }}
+.verdict .p {{ font-size:.92rem; color:{INK}; }}
 .foot {{ color:{MUTED}; font-size:.8rem; text-align:center; margin-top:30px; }}
 </style>
 """, unsafe_allow_html=True)
@@ -198,9 +223,14 @@ items = "".join(
     f'<span class="{"up" if r.Var_pct > 0 else "dn" if r.Var_pct < 0 else "eq"}">'
     f'{"▲" if r.Var_pct > 0 else "▼" if r.Var_pct < 0 else "■"} {pct(r.Var_pct)}</span></span>'
     for r in tick.itertuples())
-masi_last = mk.iloc[-1]
-items = (f'<span class="it"><span class="nm">MASI</span>{fr(masi_last.MASI, 2)} '
-         f'<span class="{"up" if masi_last.MASI_var_pct >= 0 else "dn"}">{pct(masi_last.MASI_var_pct)}</span></span>') + items
+tete = ""
+for _nom in INDICES:
+    _s = serie(h, _nom)
+    if len(_s):
+        _r = _s.iloc[-1]
+        tete += (f'<span class="it"><span class="nm" style="color:{GOLD}">{_nom}</span>{fr(_r.Valeur, 2)} '
+                 f'<span class="{"up" if _r.Var_jour_pct >= 0 else "dn"}">{pct(_r.Var_jour_pct)}</span></span>')
+items = tete + items
 st.markdown(f'<div class="bvc-ticker"><div class="track">{items}{items}</div></div>', unsafe_allow_html=True)
 
 if controles:
@@ -210,40 +240,174 @@ if controles:
                      column_config={"Volume lu": st.column_config.NumberColumn(format="%.2f"),
                                     "Volume officiel": st.column_config.NumberColumn(format="%.2f")})
 
-# ====================================================================== chiffres clés
-masi_debut = mk_p["MASI"].iloc[0] / (1 + mk_p["MASI_var_pct"].iloc[0] / 100)
-masi_var = (mk_p["MASI"].iloc[-1] / masi_debut - 1) * 100
-moy = mk_p["Volume_MAD"].mean()
-dern = mk_p["Volume_MAD"].iloc[-1]
-top5 = sig["Part_periode_pct"].head(5).sum() if not sig.empty else 0
-hausse = int((last["Var_pct"] > 0).sum())
-baisse = int((last["Var_pct"] < 0).sum())
+# ====================================================================== téléchargement
 lm = liq_m.iloc[-1]
-c1, c2 = st.columns([5, 1])
-with c1:
-    st.markdown('<div class="kpis">' +
-                kpi(f"Volume · {nb} séances", mm(mk_p["Volume_MAD"].sum()), "MAD", gold=True) +
-                kpi("Moyenne / séance", mm(moy), "MAD") +
-                kpi("Dernière séance", mm(dern), pct((dern / moy - 1) * 100, 0) + " vs moyenne",
-                    "up" if dern >= moy else "dn") +
-                kpi("MASI", fr(mk_p["MASI"].iloc[-1], 2), pct(masi_var) + f" sur {nb} séances",
-                    "up" if masi_var >= 0 else "dn") +
-                kpi("Hausses / baisses", f"{hausse} / {baisse}", "dernière séance") +
-                kpi("Concentration", f"{fr(top5, 0)} %", "du volume sur 5 valeurs") +
-                kpi("Volume hors blocs", f"{fr(lm.Volume_fond / lm.Volume_total * 100 if lm.Volume_total else 0, 0)} %",
-                    "dernière séance") +
-                '</div>', unsafe_allow_html=True)
-with c2:
-    st.download_button("⬇️ Excel", data=xlsx, use_container_width=True,
-                       file_name=f"bvc_volumes_{pd.Timestamp(dates[-1]):%Y%m%d}.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    st.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au {pd.Timestamp(dates[-1]):%d/%m/%Y}")
+st.sidebar.markdown("## 📤 Exporter")
+st.sidebar.download_button("⬇️ Excel complet", data=xlsx, use_container_width=True,
+                           file_name=f"bvc_volumes_{pd.Timestamp(dates[-1]):%Y%m%d}.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+st.sidebar.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au "
+                   f"{pd.Timestamp(dates[-1]):%d/%m/%Y}. Réutilise ce fichier la prochaine fois pour continuer.")
 
-tabs = st.tabs(["📰 Hebdo MASI 20", "🗺️ Carte du marché", "📊 Marché", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
-                "🧱 Grosses transactions", "📄 Données"])
+tabs = st.tabs(["🏛️ Indices", "📰 Hebdo MASI 20", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
+                "🧱 Grosses transactions", "🗺️ Carte du marché", "📊 Marché"])
+
+# ====================================================================== Indices (accueil)
+LIQ_COUL = {"Très liquide": GREEN, "Liquide": "#3E7CB1", "Peu liquide": GOLD, "Illiquide": RED}
+
+
+def classe_score(x):
+    return "Très liquide" if x >= 75 else "Liquide" if x >= 50 else "Peu liquide" if x >= 25 else "Illiquide"
+
+
+def popup_indice(nom, L):
+    """Contenu de la fenêtre d'explication de la liquidité d'un indice."""
+    st.markdown(f"#### Liquidité du {nom} : {fr(L['score'], 0)} / 100")
+    st.markdown(
+        "**Comment on obtient ce chiffre**\n\n"
+        "1. Chaque valeur reçoit un score de liquidité sur 100, fait de 4 ingrédients.\n"
+        f"2. On fait la moyenne de ces scores, **pondérée par le poids de chaque valeur dans le {nom}**.\n\n"
+        "Une grosse valeur peu liquide fait donc baisser la note de l'indice.")
+    ing = pd.DataFrame({
+        "Ingrédient": ["Argent échangé (hors grosses transactions)", "Régularité (jours avec échanges)",
+                       "Écart entre acheteurs et vendeurs", "Coût pour faire bouger le cours"],
+        "Points": [L["ingredients"]["volume"], L["ingredients"]["frequence"], L["ingredients"]["ecart"],
+                   L["ingredients"]["impact"]],
+        "Maximum": [30, 20, 20, 30]})
+    ing["Lbl"] = ing.apply(lambda r: f"{fr(r.Points, 0)} / {r.Maximum}", axis=1)
+    base = alt.Chart(ing).encode(y=alt.Y("Ingrédient:N", sort=None, title=None, axis=alt.Axis(labelLimit=260)))
+    st.altair_chart(alt.layer(
+        base.mark_bar(color="#E3E8F0", cornerRadius=4).encode(x=alt.X("Maximum:Q", title=None, axis=None)),
+        base.mark_bar(color=GOLD, cornerRadius=4).encode(x="Points:Q"),
+        base.mark_text(align="left", dx=4, color=INK).encode(x="Maximum:Q", text="Lbl:N"),
+    ).properties(height=170), use_container_width=True)
+    st.markdown("**Les valeurs qui pèsent le plus dans la note**")
+    det = L["detail"].head(6)
+    st.dataframe(det[["Valeur", "Poids_pct", "Score", "Apport_score"]], hide_index=True, use_container_width=True,
+                 column_config={"Poids_pct": st.column_config.NumberColumn("Poids", format="%.1f %%"),
+                                "Score": st.column_config.NumberColumn("Score valeur", format="%.0f"),
+                                "Apport_score": st.column_config.NumberColumn("Apport à la note", format="%.1f pts")})
+    st.markdown(
+        f"**Coût pour bouger l'indice de 1 %** : {fr(L['cout_1pct'] / 1e6, 0)} M MAD. "
+        "Pour chaque valeur, on calcule combien de MAD il faut échanger pour que son cours bouge de 1 % "
+        "(variation ÷ argent échangé, en médiane sur la période), puis on additionne. "
+        "Plus ce montant est élevé, plus l'indice est profond.")
+    notes = [f"Poids {L['source_poids']} : nombre de titres × cours, sans flottant ni plafonnement."
+             if L["source_poids"] == "approchés" else "Poids officiels issus du fichier de composition."]
+    if L["n_sans_impact"]:
+        notes.append(f"{L['n_sans_impact']} valeur(s) sans échange sur la période comptent pour 0.")
+    st.caption(" ".join(notes))
+
+
+with tabs[0]:
+    date = dates[-1]
+    st.markdown(f"### Les indices · séance du {pd.Timestamp(date):%d/%m/%Y}")
+    cols = st.columns(3)
+    verdicts = []
+    for col, nom in zip(cols, INDICES):
+        with col:
+            s_ = serie(h, nom)
+            if s_.empty:
+                st.warning(f"{nom} introuvable dans les bulletins.")
+                continue
+            r_ = s_.iloc[-1]
+            vs, nj = variation_semaine(s_, date)
+            cl = lambda v: "up-t" if v >= 0 else "dn-t"  # noqa: E731
+            st.markdown(
+                f'<div class="idx{" m20" if nom == "MASI 20" else ""}"><div class="nm">{nom}</div>'
+                f'<div class="ds">{INDICES[nom]["texte"]}</div>'
+                f'<div class="lv">{fr(r_.Valeur, 2)}</div>'
+                f'<div class="vr"><span>Jour <b class="{cl(r_.Var_jour_pct)}">{pct(r_.Var_jour_pct)}</b></span>'
+                f'<span>Semaine <b class="{cl(vs)}">{pct(vs)}</b></span>'
+                f'<span>Depuis le 1er janvier <b class="{cl(r_.Var_annee_pct)}">{pct(r_.Var_annee_pct)}</b></span></div>'
+                f'</div>', unsafe_allow_html=True)
+            if len(s_) > 1:
+                sp = s_.assign(Seance=s_["Date"].dt.strftime("%d/%m"))
+                st.altair_chart(alt.Chart(sp).mark_line(
+                    color=GOLD if nom == "MASI 20" else INK, strokeWidth=2.5,
+                    point=alt.OverlayMarkDef(size=35, color=GOLD if nom == "MASI 20" else INK)).encode(
+                    x=alt.X("Seance:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Valeur:Q", scale=alt.Scale(zero=False), title=None, axis=alt.Axis(tickCount=3)),
+                    tooltip=[alt.Tooltip("Seance", title="Séance"), alt.Tooltip("Valeur", format=",.2f"),
+                             alt.Tooltip("Var_jour_pct", title="Var. %", format="+.2f")]).properties(height=110),
+                    use_container_width=True)
+
+            compo_ = composition(h, nom)
+            compo_ = compo_[compo_["Valeur"].isin(set(vj["Valeur"]))]
+            if compo_.empty:
+                st.markdown(
+                    f'<div class="liq"><div class="t">Liquidité de l\'indice</div>'
+                    f'<div class="row"><span>Composition non renseignée</span><span>—</span></div></div>',
+                    unsafe_allow_html=True)
+                st.caption(f"Ajoute la liste de ses valeurs dans {INDICES[nom]['fichier']} pour calculer sa liquidité.")
+                continue
+            L = liquidite_indice(h, liq, compo_, date)
+            vol = volume_indice(h, vj, compo_, dates)
+            tl, tl_txt = tendance_liquidite(vol, date)
+            vday = vol[vol["Date"] == date]
+            cls_ = classe_score(L["score"])
+            st.markdown(
+                f'<div class="liq"><div class="t">Liquidité de l\'indice · {nb_liq if nb_liq <= len(dates) else len(dates)} séances</div>'
+                f'<div><span class="sc">{fr(L["score"], 0)}</span><span style="color:{MUTED}"> / 100</span>'
+                f'<span class="cl" style="color:{LIQ_COUL[cls_]}">{cls_}</span></div>'
+                f'<div class="gauge"><i style="width:{L["score"]:.0f}%;background:{LIQ_COUL[cls_]}"></i></div>'
+                f'<div class="row"><span>Coût pour bouger de 1 %</span><span>{fr(L["cout_1pct"] / 1e6, 0)} M</span></div>'
+                f'<div class="row"><span>Argent échangé ce jour*</span><span>{mm(vday["Volume_fond"].sum())}</span></div>'
+                f'<div class="row"><span>Tendance de l\'argent échangé*</span>'
+                f'<span class="{cl(tl) if not np.isnan(tl) else ""}">{pct(tl, 0) if not np.isnan(tl) else "—"}</span></div>'
+                f'</div>', unsafe_allow_html=True)
+            st.caption(f"Montants en MAD. *Hors grosses transactions. Tendance : {tl_txt}.")
+            with st.popover("ⓘ Comment est calculée cette liquidité ?", use_container_width=True):
+                popup_indice(nom, L)
+            titre, phrase, ton = lecture(vs, tl)
+            verdicts.append((nom, titre, phrase, ton, vs, tl))
+
+    if verdicts:
+        st.markdown("### Ce que disent le prix et la liquidité cette semaine")
+        vc = st.columns(len(verdicts) + 1)
+        for c_, (nom, titre, phrase, ton, vs, tl) in zip(vc, verdicts):
+            c_.markdown(f'<div class="verdict {ton}"><div class="k">{nom} · {pct(vs)} · argent échangé {pct(tl, 0)}</div>'
+                        f'<div class="h">{titre}</div><div class="p">{phrase}</div></div>', unsafe_allow_html=True)
+        with vc[-1].popover("ⓘ Comment lire cette grille", use_container_width=True):
+            st.markdown(
+                "On croise **le sens de l'indice** sur la semaine et **l'évolution de l'argent échangé** "
+                "sur ses valeurs (hors grosses transactions).")
+            st.markdown(
+                "| | Argent échangé en hausse | Argent échangé en baisse |\n|---|---|---|\n"
+                "| **Indice en hausse** | 🟢 Hausse solide | 🟡 Hausse fragile |\n"
+                "| **Indice en baisse** | 🔴 Vraie vente | 🟡 Baisse par manque d'acheteurs |")
+            st.caption("Seuils : ±0,25 % pour l'indice, ±10 % pour l'argent échangé. Entre les deux : activité stable, "
+                       "rotation ou marché calme. La comparaison se fait avec la semaine précédente quand elle est "
+                       "disponible, sinon entre la fin et le début de la semaine.")
+
+    st.markdown("### L'indice et l'argent qui le fait bouger")
+    choix_idx = st.radio("Indice", [n for n in INDICES if not composition(h, n).empty], horizontal=True,
+                         label_visibility="collapsed")
+    compo_c = composition(h, choix_idx)
+    vol = volume_indice(h, vj, compo_c, dates)
+    vol["Grosses transactions"] = (vol["Volume"] - vol["Volume_fond"]) / 1e6
+    vol["Échanges courants"] = vol["Volume_fond"] / 1e6
+    s_c = serie(h, choix_idx)
+    g = vol.merge(s_c, on="Date").assign(Seance=lambda x: x["Date"].dt.strftime("%d/%m"))
+    long = g.melt(id_vars=["Seance"], value_vars=["Échanges courants", "Grosses transactions"], var_name="Type", value_name="M")
+    bars = alt.Chart(long).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+        x=alt.X("Seance:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+        y=alt.Y("sum(M):Q", title="Argent échangé sur ses valeurs (M MAD)"),
+        color=alt.Color("Type:N", scale=alt.Scale(domain=["Échanges courants", "Grosses transactions"], range=[INK, GOLD]),
+                        legend=alt.Legend(orient="top", title=None)),
+        tooltip=["Seance", "Type", alt.Tooltip("M", title="M MAD", format=",.1f")])
+    coul_l = RED if g["Var_jour_pct"].sum() < 0 else GREEN
+    line = alt.Chart(g).mark_line(color=coul_l, strokeWidth=3,
+                                  point=alt.OverlayMarkDef(size=60, color=coul_l)).encode(
+        x=alt.X("Seance:N", sort=None), y=alt.Y("Valeur:Q", scale=alt.Scale(zero=False), title=choix_idx),
+        tooltip=["Seance", alt.Tooltip("Valeur", title=choix_idx, format=",.2f"),
+                 alt.Tooltip("Var_jour_pct", title="Var. %", format="+.2f")])
+    st.altair_chart(alt.layer(bars, line).resolve_scale(y="independent").properties(height=320), use_container_width=True)
+    st.caption("Barres : argent échangé chaque séance sur les valeurs de l'indice. En bleu les échanges courants, "
+               "en or les grosses transactions entre institutionnels. Ligne : niveau de l'indice.")
 
 # ====================================================================== Hebdo MASI 20
-with tabs[0]:
+with tabs[1]:
     compo_def = charger_composition()
     sem = semaines(dates)
     cles = list(sem)
@@ -332,7 +496,7 @@ with tabs[0]:
                                             "Score_liquidite": st.column_config.NumberColumn("Liquidité", format="%.0f")})
 
 # ====================================================================== Carte du marché
-with tabs[1]:
+with tabs[6]:
     a, b = st.columns([3, 1])
     with a:
         seance = st.select_slider("Séance", options=dates, value=dates[-1],
@@ -356,7 +520,7 @@ with tabs[1]:
                "Les plus grandes tuiles concentrent le volume.")
 
 # ====================================================================== Marché
-with tabs[2]:
+with tabs[7]:
     a, b = st.columns(2)
     with a:
         st.subheader("Volume du marché par séance")
@@ -395,7 +559,7 @@ with tabs[2]:
     st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
 
 # ====================================================================== Signaux
-with tabs[3]:
+with tabs[2]:
     st.subheader(f"Signaux prix / volume sur {nb} séances")
     counts = sig["Signal"].value_counts()
     emo = {"Hausse confirmée": "🟢", "Baisse sous volume": "🔴", "Hausse sans volume": "🟡",
@@ -429,9 +593,37 @@ with tabs[3]:
             "- **Flux** : ticket moyen ≥ 250 000 MAD = institutionnel, ≤ 60 000 MAD = particuliers.")
 
 # ====================================================================== Liquidité
-with tabs[4]:
+with tabs[3]:
     n_liq = min(nb_liq, len(dates))
-    st.subheader(f"Score de liquidité · {n_liq} dernières séances")
+    hc1, hc2 = st.columns([3, 1])
+    hc1.subheader(f"Score de liquidité · {n_liq} dernières séances")
+    with hc2.popover("ⓘ La formule, valeur par valeur", use_container_width=True):
+        v_ = st.selectbox("Valeur", liq["Valeur"].tolist(), key="liq_formule")
+        x_ = liq[liq["Valeur"] == v_].iloc[0]
+        st.markdown(f"#### {v_} : {fr(x_.Score, 0)} / 100 · {x_.Classe}")
+        st.markdown("On classe toutes les valeurs sur 4 ingrédients. Être le meilleur sur un ingrédient donne "
+                    "tous ses points, être le dernier n'en donne presque aucun. **Score = somme des points.**")
+        ing_ = pd.DataFrame({
+            "Ingrédient": ["Argent échangé / jour (hors grosses transactions)", "Régularité",
+                           "Écart acheteurs / vendeurs", "Coût pour faire bouger le cours"],
+            "Mesure": [mm(x_.Volume_fond_median) + " MAD", f"{fr(x_.Frequence_pct, 0)} % des séances",
+                       "—" if np.isnan(x_.Ecart_median_pct) else f"{fr(x_.Ecart_median_pct, 2)} %",
+                       "—" if np.isnan(x_.MAD_pour_1pct_impact) else mm(x_.MAD_pour_1pct_impact) + " MAD pour 1 %"],
+            "Points": [x_.Pts_volume, x_.Pts_frequence, x_.Pts_ecart, x_.Pts_impact],
+            "Maximum": [30, 20, 20, 30]})
+        ing_["Lbl"] = ing_.apply(lambda r: f"{fr(r.Points, 0)} / {r.Maximum}", axis=1)
+        b_ = alt.Chart(ing_).encode(y=alt.Y("Ingrédient:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)))
+        st.altair_chart(alt.layer(
+            b_.mark_bar(color="#E3E8F0", cornerRadius=4).encode(x=alt.X("Maximum:Q", axis=None)),
+            b_.mark_bar(color=GOLD, cornerRadius=4).encode(x="Points:Q"),
+            b_.mark_text(align="left", dx=4, color=INK).encode(x="Maximum:Q", text="Lbl:N"),
+        ).properties(height=170), use_container_width=True)
+        st.dataframe(ing_[["Ingrédient", "Mesure", "Points"]], hide_index=True, use_container_width=True,
+                     column_config={"Points": st.column_config.NumberColumn(format="%.1f")})
+        st.caption("Régularité : part des séances où la valeur a été échangée. Écart : (meilleure offre − meilleure "
+                   "demande) ÷ milieu, à la clôture. Coût pour faire bouger le cours : argent qu'il faut échanger pour "
+                   "que le cours varie de 1 % (médiane sur la période). Grosses transactions : au moins 5 M MAD et "
+                   "1 M MAD par contrat.")
     if n_liq < 20:
         st.warning(f"Seulement {n_liq} séance(s) d'historique : le score se stabilise à partir de 20 séances.")
     classes = liq["Classe"].value_counts()
@@ -484,18 +676,9 @@ with tabs[4]:
                      alt.Tooltip("Valeurs_traitees", title="Valeurs traitées"),
                      alt.Tooltip("Ecart_median_pct", title="Écart médian %", format=".2f")])
     ).resolve_scale(y="independent").properties(height=280), use_container_width=True)
-    with st.expander("Comment est construit le score"):
-        st.markdown(
-            "Chaque valeur est classée en percentile sur quatre mesures (médianes sur la fenêtre), puis :\n\n"
-            "**Score = 30 % volume de fond + 20 % fréquence + 20 % écart achat/vente + 30 % impact**\n\n"
-            "- **Volume de fond** : volume du jour hors grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat).\n"
-            "- **Fréquence** : part des séances où la valeur a été traitée.\n"
-            "- **Écart achat/vente** : (meilleure offre − meilleure demande) / milieu, à la clôture. "
-            "C'est une photo prise après la séance, d'où son poids modéré.\n"
-            "- **Impact (Amihud)** : |variation %| ÷ volume en M MAD. *MAD pour bouger de 1 %* en est l'inverse.")
 
 # ====================================================================== Zoom valeur
-with tabs[5]:
+with tabs[4]:
     choix = st.selectbox("Valeur", sig["Valeur"].tolist())
     r = sig[sig["Valeur"] == choix].iloc[0]
     lq = liq[liq["Valeur"] == choix]
@@ -547,7 +730,7 @@ with tabs[5]:
         st.caption("Le niveau doré concentre le plus de volume : support ou résistance probable.")
 
 # ====================================================================== Blocs
-with tabs[6]:
+with tabs[5]:
     st.subheader("Grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat)")
     bp = blocs[blocs["Date"].isin(periode)]
     st.dataframe(bp, hide_index=True, use_container_width=True,
@@ -558,11 +741,6 @@ with tabs[6]:
                                                                                      min_value=0, max_value=100),
                                 "Prix_vs_cloture_pct": st.column_config.NumberColumn(format="%+.2f %%")})
     st.caption("Un bloc payé au-dessus de la clôture montre un acheteur décidé ; en dessous, un vendeur pressé.")
-
-# ====================================================================== Données
-with tabs[7]:
-    st.subheader("Volumes par valeur et par séance")
-    st.dataframe(vj[vj["Date"].isin(periode)], hide_index=True, use_container_width=True, height=520)
 
 st.markdown('<div class="foot">Outil indépendant, non affilié à la Bourse de Casablanca. '
             'Données issues des bulletins de la cote publics. Ne constitue pas un conseil en investissement.</div>',

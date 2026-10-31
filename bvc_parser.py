@@ -65,7 +65,8 @@ def parse_bulletin(pdf_path_or_file):
     cotation, physio, indices = [], [], []
     totaux = {}
     seance = None
-    segment = None       # 'CENTRAL' ou 'TRANSFERTS'
+    segment = None       # 'CENTRAL' ou le nom d'un autre compartiment (TRANSFERTS, BLOCS, ...)
+    sous_section = None  # 'ACTIONS', 'DROITS', ...
     in_physio = False
 
     with pdfplumber.open(pdf_path_or_file) as pdf:
@@ -81,31 +82,37 @@ def parse_bulletin(pdf_path_or_file):
                     if m:
                         seance = datetime.strptime(m.group(1), "%d/%m/%Y").date()
 
-                # Repères de sections
                 if first.startswith("PHYSIONOMIE DES TRANSACTIONS"):
                     in_physio = True
                     continue
-                if first.startswith("MARCHE CENTRAL"):
-                    segment = "CENTRAL"
-                if first.startswith("TRANSFERTS"):
-                    segment = "TRANSFERTS"
-                if first.startswith("TOTAL GENERAL") or first.startswith("DROITS"):
-                    in_physio = False
-                    continue
 
-                # ---- Physionomie : Nom | Prix | Quantité | Volume | Contrats
-                if in_physio and segment == "CENTRAL":
-                    if len(cells) == 4 and first in ("ACTIONS", "MARCHE CENTRAL") and all(is_num(c) for c in cells[1:]):
-                        totaux.setdefault(first, (to_num(cells[1]), to_num(cells[2]), to_num(cells[3])))
+                if in_physio:
+                    # Ligne de total de section : Nom | Quantité | Volume | Contrats
+                    if len(cells) == 4 and all(is_num(c) for c in cells[1:]):
+                        nom = first.upper()
+                        if nom.startswith("TOTAL GENERAL"):
+                            in_physio = False
+                        elif nom.startswith("MARCHE CENTRAL"):
+                            segment, sous_section = "CENTRAL", None
+                        elif nom in ("ACTIONS", "DROITS", "OBLIGATIONS", "TITRES DE CREANCES", "OPCVM", "BONS"):
+                            sous_section = nom
+                            if segment == "CENTRAL" and nom == "ACTIONS":
+                                totaux.setdefault("ACTIONS", (to_num(cells[1]), to_num(cells[2]), to_num(cells[3])))
+                        else:
+                            # Tout autre compartiment (transferts, blocs, offres...) n'est pas le marché central
+                            segment, sous_section = nom, None
                         continue
+                    # Ligne d'échange : Nom | Prix | Quantité | Volume | Contrats
                     if len(cells) == 5 and all(is_num(c) for c in cells[1:]):
-                        physio.append({
-                            "Valeur": first,
-                            "Prix": to_num(cells[1]),
-                            "Quantite": to_num(cells[2]),
-                            "Volume_MAD": to_num(cells[3]),
-                            "Contrats": int(to_num(cells[4])),
-                        })
+                        if segment == "CENTRAL" and sous_section == "ACTIONS":
+                            physio.append({
+                                "Valeur": first,
+                                "Prix": to_num(cells[1]),
+                                "Quantite": to_num(cells[2]),
+                                "Volume_MAD": to_num(cells[3]),
+                                "Contrats": int(to_num(cells[4])),
+                            })
+                        continue
                     continue
 
                 # ---- Cotation : ligne qui contient un code ISIN

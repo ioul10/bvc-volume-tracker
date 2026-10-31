@@ -433,6 +433,13 @@ with tabs[1]:
             data = None
         if data:
             R, T = data["resume"], data["valeurs"]
+            _phy = h["Physionomie"].groupby("Date")["Volume_MAD"].sum()
+            _off = h["Marche"].set_index("Date")["Volume_MAD"]
+            _ecarts = [d for d in sem[k] if abs(_phy.get(d, 0) - _off.get(d, 0)) > 1]
+            if _ecarts:
+                st.warning("Lecture incomplète pour " + ", ".join(f"{pd.Timestamp(d):%d/%m}" for d in _ecarts) +
+                           " : le volume lu ne correspond pas au total officiel du bulletin. Les volumes de cette "
+                           "semaine sont faussés. Recharge ces bulletins avec la dernière version de l'application.")
             st.markdown('<div class="kpis">' +
                         kpi("MASI 20", fr(R["m20_fin"], 2), pct(R["m20_var"]) + " sur la semaine",
                             "up" if R["m20_var"] >= 0 else "dn", gold=True) +

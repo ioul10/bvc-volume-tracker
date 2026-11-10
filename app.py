@@ -11,7 +11,9 @@ from bvc_hebdo import charger_composition, donnees_hebdo, libelle_semaine, rappo
 from bvc_indices import (INDICES, composition, lecture, liquidite_indice, serie, tendance_liquidite,
                          variation_semaine, volume_indice)
 from bvc_liquidite import ajouter_feuille, liquidite
-from bvc_profondeur import SEMAINES_NORMALE, profondeur_actions, serie_hebdo
+from bvc_ilm20 import (BORNE_BAS, BORNE_HAUT, PLAFOND_POIDS, SEMAINES_REF, SEMAINES_REF_MIN, SEUIL_BAS, SEUIL_HAUT,
+                       meteo)
+from bvc_ilm20 import calculer as calculer_ilm
 from bvc_parser import parse_bulletin
 
 st.set_page_config(page_title="BVC Volume Tracker", page_icon="📈", layout="wide")
@@ -210,6 +212,7 @@ xlsx, t = build_workbook(h, nb)
 vj, sig, blocs = t["volumes_jour"], t["signaux"], t["blocs"]
 liq, liq_m = liquidite(h, vj, nb_liq)
 xlsx = ajouter_feuille(xlsx, liq)
+ilm = calculer_ilm(h, vj, composition(h, "MASI 20"))
 
 periode = dates[-nb:]
 mk = h["Marche"].sort_values("Date")
@@ -250,7 +253,7 @@ st.sidebar.download_button("⬇️ Excel complet", data=xlsx, use_container_widt
 st.sidebar.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au "
                    f"{pd.Timestamp(dates[-1]):%d/%m/%Y}. Réutilise ce fichier la prochaine fois pour continuer.")
 
-tabs = st.tabs(["🏛️ Indices", "📏 Profondeur MASI 20", "📰 Hebdo MASI 20", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
+tabs = st.tabs(["🏛️ Indices", "💧 Liquidité MASI 20", "📰 Hebdo MASI 20", "🚦 Signaux", "📋 Classement liquidité", "🔎 Zoom valeur",
                 "🧱 Grosses transactions", "🗺️ Carte du marché", "📊 Marché"])
 
 # ====================================================================== Indices (accueil)
@@ -333,53 +336,49 @@ with tabs[0]:
                              alt.Tooltip("Var_jour_pct", title="Var. %", format="+.2f")]).properties(height=110),
                     use_container_width=True)
 
-            compo_ = composition(h, nom)
-            compo_ = compo_[compo_["Valeur"].isin(set(vj["Valeur"]))]
-            if compo_.empty:
-                st.markdown(
-                    f'<div class="liq"><div class="t">Liquidité de l\'indice</div>'
-                    f'<div class="row"><span>Composition non renseignée</span><span>—</span></div></div>',
-                    unsafe_allow_html=True)
-                st.caption(f"Ajoute la liste de ses valeurs dans {INDICES[nom]['fichier']} pour calculer sa liquidité.")
+            if nom != "MASI 20":
                 continue
-            L = liquidite_indice(h, liq, compo_, date)
-            vol = volume_indice(h, vj, compo_, dates)
-            tl, tl_txt = tendance_liquidite(vol, date)
-            vday = vol[vol["Date"] == date]
-            cls_ = classe_score(L["score"])
-            st.markdown(
-                f'<div class="liq"><div class="t">Liquidité de l\'indice · {nb_liq if nb_liq <= len(dates) else len(dates)} séances</div>'
-                f'<div><span class="sc">{fr(L["score"], 0)}</span><span style="color:{MUTED}"> / 100</span>'
-                f'<span class="cl" style="color:{LIQ_COUL[cls_]}">{cls_}</span></div>'
-                f'<div class="gauge"><i style="width:{L["score"]:.0f}%;background:{LIQ_COUL[cls_]}"></i></div>'
-                f'<div class="row"><span>Coût pour bouger de 1 %</span><span>{fr(L["cout_1pct"] / 1e6, 0)} M</span></div>'
-                f'<div class="row"><span>Argent échangé ce jour*</span><span>{mm(vday["Volume_fond"].sum())}</span></div>'
-                f'<div class="row"><span>Tendance de l\'argent échangé*</span>'
-                f'<span class="{cl(tl) if not np.isnan(tl) else ""}">{pct(tl, 0) if not np.isnan(tl) else "—"}</span></div>'
-                f'</div>', unsafe_allow_html=True)
-            st.caption(f"Montants en MAD. *Hors grosses transactions. Tendance : {tl_txt}.")
-            with st.popover("ⓘ Comment est calculée cette liquidité ?", use_container_width=True):
-                popup_indice(nom, L)
-            titre, phrase, ton = lecture(vs, tl)
-            verdicts.append((nom, titre, phrase, ton, vs, tl))
+            # Liquidité : uniquement pour le MASI 20, avec l'indice de liquidité
+            et = ilm["etat"]
+            if ilm["semaines"] is not None:
+                der = ilm["semaines"].iloc[-1]
+                ico, txt, ton_ = der["Meteo"]
+                prov = " (référence provisoire)" if et["statut"] == "provisoire" else ""
+                st.markdown(
+                    f'<div class="liq"><div class="t">Indice de liquidité · semaine au {pd.Timestamp(der.Fin):%d/%m}{prov}</div>'
+                    f'<div><span class="sc">{ico} {fr(der.Indice, 0)}</span>'
+                    f'<span class="cl" style="color:{MUTED}">{txt}</span></div>'
+                    f'<div class="row"><span>Il faut échanger, pour bouger le MASI 20 de 1 %</span>'
+                    f'<span>{fr(der.Profondeur_MAD / 1e6, 0)} M MAD</span></div></div>', unsafe_allow_html=True)
+                vliq, vliq_txt = der.Indice - 100, "indice de liquidité vs référence"
+            else:
+                st.markdown(
+                    f'<div class="liq"><div class="t">Indice de liquidité</div>'
+                    f'<div class="row"><span>Historique en construction</span>'
+                    f'<span>{et["seances"]} / {SEMAINES_REF_MIN * 5} séances</span></div></div>', unsafe_allow_html=True)
+                st.caption("L'indice apparaît à partir de 4 semaines de bulletins (référence provisoire), "
+                           "et devient définitif à 12 semaines. Détail dans l'onglet « Liquidité MASI 20 ».")
+                vol = volume_indice(h, vj, composition(h, nom), dates)
+                vliq, vliq_txt = tendance_liquidite(vol, date)
+            titre, phrase, ton = lecture(vs, vliq)
+            verdicts.append((nom, titre, phrase, ton, vs, vliq))
 
     if verdicts:
-        st.markdown("### Ce que disent le prix et la liquidité cette semaine")
-        vc = st.columns(len(verdicts) + 1)
+        st.markdown("### MASI 20 : ce que disent le prix et la liquidité cette semaine")
+        vc = st.columns([2, 1])
         for c_, (nom, titre, phrase, ton, vs, tl) in zip(vc, verdicts):
-            c_.markdown(f'<div class="verdict {ton}"><div class="k">{nom} · {pct(vs)} · argent échangé {pct(tl, 0)}</div>'
+            c_.markdown(f'<div class="verdict {ton}"><div class="k">{nom} · prix {pct(vs)} · liquidité {pct(tl, 0)}</div>'
                         f'<div class="h">{titre}</div><div class="p">{phrase}</div></div>', unsafe_allow_html=True)
         with vc[-1].popover("ⓘ Comment lire cette grille", use_container_width=True):
             st.markdown(
-                "On croise **le sens de l'indice** sur la semaine et **l'évolution de l'argent échangé** "
-                "sur ses valeurs (hors grosses transactions).")
+                "On croise **le sens du MASI 20** sur la semaine et **sa liquidité** : l'écart de l'indice de liquidité "
+                "à 100 quand il existe, sinon l'évolution de l'argent échangé sur ses valeurs.")
             st.markdown(
-                "| | Argent échangé en hausse | Argent échangé en baisse |\n|---|---|---|\n"
+                "| | Liquidité en hausse | Liquidité en baisse |\n|---|---|---|\n"
                 "| **Indice en hausse** | 🟢 Hausse solide | 🟡 Hausse fragile |\n"
                 "| **Indice en baisse** | 🔴 Vraie vente | 🟡 Baisse par manque d'acheteurs |")
-            st.caption("Seuils : ±0,25 % pour l'indice, ±10 % pour l'argent échangé. Entre les deux : activité stable, "
-                       "rotation ou marché calme. La comparaison se fait avec la semaine précédente quand elle est "
-                       "disponible, sinon entre la fin et le début de la semaine.")
+            st.caption("Seuils : ±0,25 % pour le prix, ±10 % pour la liquidité. Entre les deux : activité stable, "
+                       "rotation ou marché calme.")
 
     st.markdown("### L'indice et l'argent qui le fait bouger")
     choix_idx = st.radio("Indice", [n for n in INDICES if not composition(h, n).empty], horizontal=True,
@@ -407,122 +406,99 @@ with tabs[0]:
     st.caption("Barres : argent échangé chaque séance sur les valeurs de l'indice. En bleu les échanges courants, "
                "en or les grosses transactions entre institutionnels. Ligne : niveau de l'indice.")
 
-# ====================================================================== Profondeur MASI 20
+# ====================================================================== Liquidité MASI 20
 with tabs[1]:
-    noms20 = [v for v in composition(h, "MASI 20")["Valeur"] if v in set(vj["Valeur"])]
-    sem_p = semaines(dates)
-    cles_p = list(sem_p)
-    a, b = st.columns([2, 2])
-    with a:
-        k_p = st.selectbox("Semaine", cles_p[::-1], format_func=lambda x: libelle_semaine(sem_p[x]), key="prof_sem")
-    with b:
-        excl = st.toggle("Exclure les blocs probables", value=True,
-                         help="Niveaux de prix d'au moins 5 M MAD avec au moins 1 M MAD par contrat en moyenne. "
-                              "Ce sont des échanges ponctuels entre institutionnels, qui ne reflètent pas la "
-                              "liquidité d'un jour normal.")
-    if len(noms20) < 2:
-        st.warning("Composition du MASI 20 introuvable (masi20.csv).")
+    et = ilm["etat"]
+    if ilm["semaines"] is None:
+        st.markdown("### Indice de liquidité du MASI 20 · historique en construction")
+        objectif = SEMAINES_REF_MIN * 5
+        st.progress(min(1.0, et["seances"] / objectif),
+                    text=f"{et['seances']} séance(s) sur {objectif} pour une première référence (provisoire)")
+        st.progress(min(1.0, et["seances"] / (SEMAINES_REF * 5)),
+                    text=f"{et['seances']} séance(s) sur {SEMAINES_REF * 5} pour la référence définitive")
+        st.info("L'indice compare chaque semaine à une **période de référence** (base 100). Il faut au moins "
+                f"{SEMAINES_REF_MIN} semaines de bulletins pour la créer. En attendant, voici les mesures de la semaine.")
+        m_ = ilm["mesures"]
+        dern = m_[m_["Semaine"] == m_["Semaine"].max()]
+        st.metric("Il faut échanger, pour bouger le MASI 20 de 1 %", f"{fr(dern['Resistance'].sum() / 1e6, 0)} M MAD")
+        st.dataframe(dern[["Valeur", "Argent", "Intervenants", "Resistance"]].sort_values("Argent", ascending=False),
+                     hide_index=True, use_container_width=True,
+                     column_config={"Argent": st.column_config.NumberColumn("Argent / séance (MAD)", format="%,.0f"),
+                                    "Intervenants": st.column_config.NumberColumn("Contrats / séance", format="%,.0f"),
+                                    "Resistance": st.column_config.NumberColumn("MAD pour bouger de 1 %", format="%,.0f")})
     else:
-        g_p = profondeur_actions(h, vj, noms20, sem_p[k_p], excl)
-        s_p = serie_hebdo(h, vj, noms20, sem_p, excl)
-        cur = s_p[s_p["Cle"] == k_p].iloc[0]
-        tot_p = cur["Profondeur_MAD"]
-
+        ser = ilm["semaines"]
+        det = ilm["detail"]
+        cles_i = list(ser["Semaine"])
+        k_i = st.selectbox("Semaine", cles_i[::-1], key="ilm_sem",
+                           format_func=lambda k: f"Semaine du {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Debut'].iloc[0]):%d/%m} "
+                                                 f"au {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Fin'].iloc[0]):%d/%m/%Y}")
+        cur = ser[ser["Semaine"] == k_i].iloc[0]
+        ico, txt, ton = cur["Meteo"]
+        ref_txt = (f"Référence {'provisoire' if et['statut'] == 'provisoire' else ''} : semaines du "
+                   f"{pd.Timestamp(et['ref_debut']):%d/%m/%Y} au {pd.Timestamp(et['ref_fin']):%d/%m/%Y} = 100")
+        if et["statut"] == "provisoire":
+            st.warning(f"Référence provisoire ({et['semaines']} semaines). Elle sera définitive à {SEMAINES_REF} semaines.")
         st.markdown(
-            f'<div class="verdict ok" style="border-left-color:{GOLD}"><div class="k">La question · {libelle_semaine(sem_p[k_p])}</div>'
-            f'<div class="h">Combien d\'argent faut-il échanger pour faire bouger le MASI 20 de 1 % ?</div>'
-            f'<div class="p" style="font-size:1.6rem;font-family:\'JetBrains Mono\',monospace;font-weight:600;margin-top:6px">'
-            f'≈ {fr(tot_p / 1e6, 0)} M MAD</div></div>', unsafe_allow_html=True)
-        st.write("")
+            f'<div class="verdict {ton}"><div class="k">Indice de liquidité du MASI 20 · {ref_txt}</div>'
+            f'<div class="h" style="font-size:2.2rem;font-family:\'JetBrains Mono\',monospace">{ico} {fr(cur.Indice, 0)}</div>'
+            f'<div class="p"><b>{txt}.</b> Il faut échanger environ <b>{fr(cur.Profondeur_MAD / 1e6, 0)} M MAD</b> '
+            f'pour faire bouger le MASI 20 de 1 %.</div></div>', unsafe_allow_html=True)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown('<div class="kpi gold"><div class="l">Étape 1 · par action</div>'
-                        '<div class="v txt">Profondeur = argent ÷ mouvement</div>'
-                        '<div class="s">MAD échangés pour chaque 1 % de mouvement du cours, sur la semaine</div></div>',
-                        unsafe_allow_html=True)
-        with c2:
-            st.markdown(f'<div class="kpi gold"><div class="l">Étape 2 · pour le MASI 20</div>'
-                        f'<div class="v">{fr(tot_p / 1e6, 0)} M MAD</div>'
-                        f'<div class="s">Somme des profondeurs des {int(cur.Actions_mesurees)} actions mesurées</div></div>',
-                        unsafe_allow_html=True)
-        with c3:
-            if np.isnan(cur["Indice"]):
-                st.markdown(f'<div class="kpi"><div class="l">Étape 3 · indice de liquidité</div>'
-                            f'<div class="v txt">Pas encore disponible</div>'
-                            f'<div class="s">Il faut au moins une semaine précédente pour définir la normale '
-                            f'(idéalement {SEMAINES_NORMALE}).</div></div>', unsafe_allow_html=True)
-            else:
-                ind = cur["Indice"]
-                st.markdown(f'<div class="kpi"><div class="l">Étape 3 · indice de liquidité</div>'
-                            f'<div class="v">{fr(ind, 0)}</div>'
-                            f'<div class="s {"up" if ind >= 100 else "dn"}">100 = normale des '
-                            f'{int(cur.Semaines_reference)} semaine(s) précédente(s) ({fr(cur.Normale_MAD / 1e6, 0)} M MAD)</div></div>',
-                            unsafe_allow_html=True)
-
-        with st.popover("ⓘ La formule complète, avec un exemple", use_container_width=False):
-            ex = g_p.dropna(subset=["Profondeur_MAD"]).iloc[0]
-            st.markdown("**Étape 1 : pour chaque action, sur la semaine**")
-            st.latex(r"\text{Profondeur}_i = \frac{\text{Argent échangé sur la semaine (MAD)}}"
-                     r"{\sum_{\text{séances}} |\text{variation du cours en \%}|}")
-            st.markdown(f"Exemple, **{ex.Valeur}** : {fr(ex.Argent_MAD / 1e6, 1)} M MAD échangés, "
-                        f"mouvements du cours additionnés sans le signe = {fr(ex.Mouvement_pct, 2)} %. "
-                        f"Profondeur = {fr(ex.Argent_MAD / 1e6, 1)} ÷ {fr(ex.Mouvement_pct, 2)} = "
-                        f"**{fr(ex.Profondeur_MAD / 1e6, 1)} M MAD pour 1 %**.")
-            st.markdown("**Étape 2 : pour le MASI 20**")
-            st.latex(r"\text{Profondeur}_{\text{MASI 20}} = \sum_{i=1}^{20} \text{Profondeur}_i")
-            st.markdown("Pour que l'indice bouge de 1 %, ses 20 actions doivent bouger de 1 % : on additionne.")
-            st.markdown("**Étape 3 : l'indice de liquidité**")
-            st.latex(r"\text{Indice} = 100 \times \frac{\text{Profondeur de la semaine}}"
-                     r"{\text{moyenne des profondeurs des semaines précédentes}}")
-            st.markdown("100 = liquidité habituelle · au-dessus : marché plus solide · en dessous : marché plus fragile.")
-
-        if cur["Part_max_pct"] >= 40:
-            st.warning(f"À lire avec prudence : {cur.Action_max} représente à elle seule "
-                       f"{fr(cur.Part_max_pct, 0)} % de la profondeur cette semaine. Son cours a très peu bougé, ce qui "
-                       "gonfle sa profondeur.")
-
-        a, b = st.columns([1, 1])
-        with a:
-            st.markdown("#### Étape 1 en détail : la profondeur de chaque action")
-            ch = g_p.dropna(subset=["Profondeur_MAD"]).assign(M=lambda x: x["Profondeur_MAD"] / 1e6)
-            st.altair_chart(alt.Chart(ch).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
-                y=alt.Y("Valeur:N", sort="-x", title=None),
-                x=alt.X("M:Q", title="M MAD pour faire bouger le cours de 1 %"),
-                color=alt.condition(alt.datum.Valeur == cur["Action_max"], alt.value(GOLD), alt.value(INK)),
-                tooltip=["Valeur", alt.Tooltip("M", title="Profondeur (M MAD)", format=",.2f"),
-                         alt.Tooltip("Argent_MAD", title="Argent échangé (MAD)", format=",.0f"),
-                         alt.Tooltip("Mouvement_pct", title="Mouvements cumulés (%)", format=".2f"),
-                         alt.Tooltip("Part_pct", title="Part du total (%)", format=".1f")]
-            ).properties(height=520), use_container_width=True)
-        with b:
-            st.markdown("#### Le calcul, action par action")
-            st.dataframe(g_p[["Valeur", "Argent_MAD", "Mouvement_pct", "Profondeur_MAD", "Part_pct", "Remarque"]],
-                         hide_index=True, use_container_width=True, height=520,
-                         column_config={
-                             "Argent_MAD": st.column_config.NumberColumn("Argent échangé", format="%,.0f"),
-                             "Mouvement_pct": st.column_config.NumberColumn("Mouvement", format="%.2f %%"),
-                             "Profondeur_MAD": st.column_config.NumberColumn("Profondeur (MAD / 1 %)", format="%,.0f"),
-                             "Part_pct": st.column_config.ProgressColumn("Part", format="%.0f %%", min_value=0, max_value=100),
-                             "Remarque": st.column_config.TextColumn("Remarque", width="small")})
+        with st.popover("ⓘ La méthode en 5 étapes"):
+            st.markdown("**Étape 1 · trois mesures par action et par semaine** (moyennes par séance)")
+            st.markdown("- **Argent** : volume hors blocs probables\n- **Intervenants** : nombre de contrats\n"
+                        "- **Résistance** : MAD qu'il faut échanger pour faire bouger le cours de 1 % "
+                        "(inverse de la moyenne des ratios journaliers d'Amihud : |variation %| ÷ volume)")
+            st.markdown("**Étape 2 · comparaison à la référence**")
+            st.latex(r"\text{Rapport} = \frac{\text{mesure de la semaine}}{\text{moyenne de la mesure sur la référence}}"
+                     rf"\quad\text{{borné entre }}{BORNE_BAS}\text{{ et }}{BORNE_HAUT:.0f}")
+            st.markdown("**Étape 3 · note de l'action**")
+            st.latex(r"L_i = \sqrt[3]{\text{R}_{\text{argent}} \times \text{R}_{\text{intervenants}} \times \text{R}_{\text{résistance}}}")
+            st.markdown("**Étape 4 · indice du MASI 20**")
+            st.latex(r"\text{Indice} = 100 \times \sum_{i=1}^{20} w_i \times L_i")
+            st.markdown(f"$w_i$ : poids de la valeur dans le MASI 20 ({ilm['source_poids']}), plafonné à "
+                        f"{PLAFOND_POIDS * 100:.0f} %.")
+            st.markdown(f"**Étape 5 · lecture** : 🟢 {SEUIL_HAUT} et plus · 🟡 de {SEUIL_BAS} à {SEUIL_HAUT} · 🔴 moins de {SEUIL_BAS}")
+            ex = det[(det["Semaine"] == k_i)].sort_values("Poids", ascending=False).iloc[0]
+            st.markdown(f"**Exemple, {ex.Valeur}** : rapports {fr(ex.R_argent, 2)} × {fr(ex.R_intervenants, 2)} × "
+                        f"{fr(ex.R_resistance, 2)} → L = {fr(ex.L, 2)} ; poids {fr(ex.Poids * 100, 1)} % → "
+                        f"apport {fr(ex.Contribution, 1)} points.")
 
         st.markdown("#### Semaine après semaine")
-        sp = s_p.assign(Semaine=s_p["Fin"].map(lambda d: f"au {pd.Timestamp(d):%d/%m}"),
-                        M=s_p["Profondeur_MAD"] / 1e6, N=s_p["Normale_MAD"] / 1e6)
-        bars = alt.Chart(sp).mark_bar(color=INK, size=48, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-            x=alt.X("Semaine:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("M:Q", title="Profondeur du MASI 20 (M MAD pour 1 %)"),
-            tooltip=["Semaine", alt.Tooltip("M", title="Profondeur (M MAD)", format=",.0f"),
-                     alt.Tooltip("N", title="Normale (M MAD)", format=",.0f"),
-                     alt.Tooltip("Indice", format=".0f")])
-        norm_l = alt.Chart(sp.dropna(subset=["N"])).mark_line(color=GOLD, strokeDash=[5, 4], strokeWidth=2,
-                                                              point=alt.OverlayMarkDef(color=GOLD)).encode(
-            x=alt.X("Semaine:N", sort=None), y="N:Q")
-        st.altair_chart((bars + norm_l).properties(height=260), use_container_width=True)
-        if len(sp) < 4:
-            st.caption(f"{len(sp)} semaine(s) en historique. Barres : profondeur de chaque semaine. Ligne dorée : normale "
-                       f"(moyenne des semaines précédentes). L'indice devient fiable à partir d'environ "
-                       f"{SEMAINES_NORMALE} semaines.")
+        sp = ser.assign(Semaine_l=ser["Fin"].map(lambda d: f"{pd.Timestamp(d):%d/%m}"),
+                        Statut=np.where(ser["Dans_reference"], "Semaine de référence", "Après la référence"))
+        band = alt.Chart(pd.DataFrame({"y": [SEUIL_BAS], "y2": [SEUIL_HAUT]})).mark_rect(color="#F3E6C0", opacity=.5).encode(
+            y="y:Q", y2="y2:Q")
+        rule = alt.Chart(pd.DataFrame({"y": [100]})).mark_rule(color=MUTED, strokeDash=[4, 4]).encode(y="y:Q")
+        ln = alt.Chart(sp).mark_line(color=INK, strokeWidth=2.5).encode(
+            x=alt.X("Semaine_l:N", sort=None, title="Semaine se terminant le", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("Indice:Q", title="Indice de liquidité", scale=alt.Scale(zero=False)))
+        pts = alt.Chart(sp).mark_circle(size=90, stroke="#fff", strokeWidth=1).encode(
+            x=alt.X("Semaine_l:N", sort=None), y="Indice:Q",
+            color=alt.Color("Statut:N", scale=alt.Scale(domain=["Semaine de référence", "Après la référence"],
+                                                        range=["#9FB0C8", GOLD]), legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("Semaine_l", title="Semaine au"), alt.Tooltip("Indice", format=".1f"),
+                     alt.Tooltip("Profondeur_MAD", title="MAD pour 1 %", format=",.0f")])
+        st.altair_chart((band + rule + ln + pts).properties(height=280), use_container_width=True)
+        st.caption(f"Bande dorée : zone « habituelle » ({SEUIL_BAS} à {SEUIL_HAUT}). Points gris : semaines qui forment la "
+                   "référence (elles tournent autour de 100 par construction).")
+
+        st.markdown("#### Les 20 valeurs cette semaine")
+        dd = det[det["Semaine"] == k_i].sort_values("Contribution", ascending=False)
+        dd = dd.assign(Poids=dd["Poids"] * 100)
+        st.dataframe(dd[["Valeur", "Poids", "R_argent", "R_intervenants", "R_resistance", "L", "Contribution"]],
+                     hide_index=True, use_container_width=True, height=560,
+                     column_config={
+                         "Poids": st.column_config.NumberColumn("Poids", format="%.1f %%"),
+                         "R_argent": st.column_config.NumberColumn("Argent vs réf.", format="%.2f"),
+                         "R_intervenants": st.column_config.NumberColumn("Intervenants vs réf.", format="%.2f"),
+                         "R_resistance": st.column_config.NumberColumn("Résistance vs réf.", format="%.2f"),
+                         "L": st.column_config.NumberColumn("Note L", format="%.2f"),
+                         "Contribution": st.column_config.ProgressColumn("Apport à l'indice (points)", format="%.1f",
+                                                                         min_value=0, max_value=float(dd["Contribution"].max()))})
+        st.caption("1,00 = comme pendant la référence · au-dessus : plus liquide · en dessous : moins liquide. "
+                   "Le poids est affiché en %, la somme des apports donne l'indice.")
 
 # ====================================================================== Hebdo MASI 20
 with tabs[2]:

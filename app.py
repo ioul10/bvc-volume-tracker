@@ -11,6 +11,7 @@ from bvc_hebdo import charger_composition, donnees_hebdo, libelle_semaine, rappo
 from bvc_indices import (INDICES, composition, lecture, liquidite_indice, serie, tendance_liquidite,
                          variation_semaine, volume_indice)
 from bvc_liquidite import ajouter_feuille, liquidite
+from bvc_profondeur import SEMAINES_NORMALE, profondeur_actions, serie_hebdo
 from bvc_parser import parse_bulletin
 
 st.set_page_config(page_title="BVC Volume Tracker", page_icon="📈", layout="wide")
@@ -249,7 +250,7 @@ st.sidebar.download_button("⬇️ Excel complet", data=xlsx, use_container_widt
 st.sidebar.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au "
                    f"{pd.Timestamp(dates[-1]):%d/%m/%Y}. Réutilise ce fichier la prochaine fois pour continuer.")
 
-tabs = st.tabs(["🏛️ Indices", "📰 Hebdo MASI 20", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
+tabs = st.tabs(["🏛️ Indices", "📏 Profondeur MASI 20", "📰 Hebdo MASI 20", "🚦 Signaux", "💧 Liquidité", "🔎 Zoom valeur",
                 "🧱 Grosses transactions", "🗺️ Carte du marché", "📊 Marché"])
 
 # ====================================================================== Indices (accueil)
@@ -406,8 +407,125 @@ with tabs[0]:
     st.caption("Barres : argent échangé chaque séance sur les valeurs de l'indice. En bleu les échanges courants, "
                "en or les grosses transactions entre institutionnels. Ligne : niveau de l'indice.")
 
-# ====================================================================== Hebdo MASI 20
+# ====================================================================== Profondeur MASI 20
 with tabs[1]:
+    noms20 = [v for v in composition(h, "MASI 20")["Valeur"] if v in set(vj["Valeur"])]
+    sem_p = semaines(dates)
+    cles_p = list(sem_p)
+    a, b = st.columns([2, 2])
+    with a:
+        k_p = st.selectbox("Semaine", cles_p[::-1], format_func=lambda x: libelle_semaine(sem_p[x]), key="prof_sem")
+    with b:
+        excl = st.toggle("Exclure les blocs probables", value=True,
+                         help="Niveaux de prix d'au moins 5 M MAD avec au moins 1 M MAD par contrat en moyenne. "
+                              "Ce sont des échanges ponctuels entre institutionnels, qui ne reflètent pas la "
+                              "liquidité d'un jour normal.")
+    if len(noms20) < 2:
+        st.warning("Composition du MASI 20 introuvable (masi20.csv).")
+    else:
+        g_p = profondeur_actions(h, vj, noms20, sem_p[k_p], excl)
+        s_p = serie_hebdo(h, vj, noms20, sem_p, excl)
+        cur = s_p[s_p["Cle"] == k_p].iloc[0]
+        tot_p = cur["Profondeur_MAD"]
+
+        st.markdown(
+            f'<div class="verdict ok" style="border-left-color:{GOLD}"><div class="k">La question · {libelle_semaine(sem_p[k_p])}</div>'
+            f'<div class="h">Combien d\'argent faut-il échanger pour faire bouger le MASI 20 de 1 % ?</div>'
+            f'<div class="p" style="font-size:1.6rem;font-family:\'JetBrains Mono\',monospace;font-weight:600;margin-top:6px">'
+            f'≈ {fr(tot_p / 1e6, 0)} M MAD</div></div>', unsafe_allow_html=True)
+        st.write("")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown('<div class="kpi gold"><div class="l">Étape 1 · par action</div>'
+                        '<div class="v txt">Profondeur = argent ÷ mouvement</div>'
+                        '<div class="s">MAD échangés pour chaque 1 % de mouvement du cours, sur la semaine</div></div>',
+                        unsafe_allow_html=True)
+        with c2:
+            st.markdown(f'<div class="kpi gold"><div class="l">Étape 2 · pour le MASI 20</div>'
+                        f'<div class="v">{fr(tot_p / 1e6, 0)} M MAD</div>'
+                        f'<div class="s">Somme des profondeurs des {int(cur.Actions_mesurees)} actions mesurées</div></div>',
+                        unsafe_allow_html=True)
+        with c3:
+            if np.isnan(cur["Indice"]):
+                st.markdown(f'<div class="kpi"><div class="l">Étape 3 · indice de liquidité</div>'
+                            f'<div class="v txt">Pas encore disponible</div>'
+                            f'<div class="s">Il faut au moins une semaine précédente pour définir la normale '
+                            f'(idéalement {SEMAINES_NORMALE}).</div></div>', unsafe_allow_html=True)
+            else:
+                ind = cur["Indice"]
+                st.markdown(f'<div class="kpi"><div class="l">Étape 3 · indice de liquidité</div>'
+                            f'<div class="v">{fr(ind, 0)}</div>'
+                            f'<div class="s {"up" if ind >= 100 else "dn"}">100 = normale des '
+                            f'{int(cur.Semaines_reference)} semaine(s) précédente(s) ({fr(cur.Normale_MAD / 1e6, 0)} M MAD)</div></div>',
+                            unsafe_allow_html=True)
+
+        with st.popover("ⓘ La formule complète, avec un exemple", use_container_width=False):
+            ex = g_p.dropna(subset=["Profondeur_MAD"]).iloc[0]
+            st.markdown("**Étape 1 : pour chaque action, sur la semaine**")
+            st.latex(r"\text{Profondeur}_i = \frac{\text{Argent échangé sur la semaine (MAD)}}"
+                     r"{\sum_{\text{séances}} |\text{variation du cours en \%}|}")
+            st.markdown(f"Exemple, **{ex.Valeur}** : {fr(ex.Argent_MAD / 1e6, 1)} M MAD échangés, "
+                        f"mouvements du cours additionnés sans le signe = {fr(ex.Mouvement_pct, 2)} %. "
+                        f"Profondeur = {fr(ex.Argent_MAD / 1e6, 1)} ÷ {fr(ex.Mouvement_pct, 2)} = "
+                        f"**{fr(ex.Profondeur_MAD / 1e6, 1)} M MAD pour 1 %**.")
+            st.markdown("**Étape 2 : pour le MASI 20**")
+            st.latex(r"\text{Profondeur}_{\text{MASI 20}} = \sum_{i=1}^{20} \text{Profondeur}_i")
+            st.markdown("Pour que l'indice bouge de 1 %, ses 20 actions doivent bouger de 1 % : on additionne.")
+            st.markdown("**Étape 3 : l'indice de liquidité**")
+            st.latex(r"\text{Indice} = 100 \times \frac{\text{Profondeur de la semaine}}"
+                     r"{\text{moyenne des profondeurs des semaines précédentes}}")
+            st.markdown("100 = liquidité habituelle · au-dessus : marché plus solide · en dessous : marché plus fragile.")
+
+        if cur["Part_max_pct"] >= 40:
+            st.warning(f"À lire avec prudence : {cur.Action_max} représente à elle seule "
+                       f"{fr(cur.Part_max_pct, 0)} % de la profondeur cette semaine. Son cours a très peu bougé, ce qui "
+                       "gonfle sa profondeur.")
+
+        a, b = st.columns([1, 1])
+        with a:
+            st.markdown("#### Étape 1 en détail : la profondeur de chaque action")
+            ch = g_p.dropna(subset=["Profondeur_MAD"]).assign(M=lambda x: x["Profondeur_MAD"] / 1e6)
+            st.altair_chart(alt.Chart(ch).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+                y=alt.Y("Valeur:N", sort="-x", title=None),
+                x=alt.X("M:Q", title="M MAD pour faire bouger le cours de 1 %"),
+                color=alt.condition(alt.datum.Valeur == cur["Action_max"], alt.value(GOLD), alt.value(INK)),
+                tooltip=["Valeur", alt.Tooltip("M", title="Profondeur (M MAD)", format=",.2f"),
+                         alt.Tooltip("Argent_MAD", title="Argent échangé (MAD)", format=",.0f"),
+                         alt.Tooltip("Mouvement_pct", title="Mouvements cumulés (%)", format=".2f"),
+                         alt.Tooltip("Part_pct", title="Part du total (%)", format=".1f")]
+            ).properties(height=520), use_container_width=True)
+        with b:
+            st.markdown("#### Le calcul, action par action")
+            st.dataframe(g_p[["Valeur", "Argent_MAD", "Mouvement_pct", "Profondeur_MAD", "Part_pct", "Remarque"]],
+                         hide_index=True, use_container_width=True, height=520,
+                         column_config={
+                             "Argent_MAD": st.column_config.NumberColumn("Argent échangé", format="%,.0f"),
+                             "Mouvement_pct": st.column_config.NumberColumn("Mouvement", format="%.2f %%"),
+                             "Profondeur_MAD": st.column_config.NumberColumn("Profondeur (MAD / 1 %)", format="%,.0f"),
+                             "Part_pct": st.column_config.ProgressColumn("Part", format="%.0f %%", min_value=0, max_value=100),
+                             "Remarque": st.column_config.TextColumn("Remarque", width="small")})
+
+        st.markdown("#### Semaine après semaine")
+        sp = s_p.assign(Semaine=s_p["Fin"].map(lambda d: f"au {pd.Timestamp(d):%d/%m}"),
+                        M=s_p["Profondeur_MAD"] / 1e6, N=s_p["Normale_MAD"] / 1e6)
+        bars = alt.Chart(sp).mark_bar(color=INK, size=48, cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
+            x=alt.X("Semaine:N", sort=None, title=None, axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("M:Q", title="Profondeur du MASI 20 (M MAD pour 1 %)"),
+            tooltip=["Semaine", alt.Tooltip("M", title="Profondeur (M MAD)", format=",.0f"),
+                     alt.Tooltip("N", title="Normale (M MAD)", format=",.0f"),
+                     alt.Tooltip("Indice", format=".0f")])
+        norm_l = alt.Chart(sp.dropna(subset=["N"])).mark_line(color=GOLD, strokeDash=[5, 4], strokeWidth=2,
+                                                              point=alt.OverlayMarkDef(color=GOLD)).encode(
+            x=alt.X("Semaine:N", sort=None), y="N:Q")
+        st.altair_chart((bars + norm_l).properties(height=260), use_container_width=True)
+        if len(sp) < 4:
+            st.caption(f"{len(sp)} semaine(s) en historique. Barres : profondeur de chaque semaine. Ligne dorée : normale "
+                       f"(moyenne des semaines précédentes). L'indice devient fiable à partir d'environ "
+                       f"{SEMAINES_NORMALE} semaines.")
+
+# ====================================================================== Hebdo MASI 20
+with tabs[2]:
     compo_def = charger_composition()
     sem = semaines(dates)
     cles = list(sem)
@@ -503,7 +621,7 @@ with tabs[1]:
                                             "Score_liquidite": st.column_config.NumberColumn("Liquidité", format="%.0f")})
 
 # ====================================================================== Carte du marché
-with tabs[6]:
+with tabs[7]:
     a, b = st.columns([3, 1])
     with a:
         seance = st.select_slider("Séance", options=dates, value=dates[-1],
@@ -527,7 +645,7 @@ with tabs[6]:
                "Les plus grandes tuiles concentrent le volume.")
 
 # ====================================================================== Marché
-with tabs[7]:
+with tabs[8]:
     a, b = st.columns(2)
     with a:
         st.subheader("Volume du marché par séance")
@@ -566,7 +684,7 @@ with tabs[7]:
     st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
 
 # ====================================================================== Signaux
-with tabs[2]:
+with tabs[3]:
     st.subheader(f"Signaux prix / volume sur {nb} séances")
     counts = sig["Signal"].value_counts()
     emo = {"Hausse confirmée": "🟢", "Baisse sous volume": "🔴", "Hausse sans volume": "🟡",
@@ -600,7 +718,7 @@ with tabs[2]:
             "- **Flux** : ticket moyen ≥ 250 000 MAD = institutionnel, ≤ 60 000 MAD = particuliers.")
 
 # ====================================================================== Liquidité
-with tabs[3]:
+with tabs[4]:
     n_liq = min(nb_liq, len(dates))
     hc1, hc2 = st.columns([3, 1])
     hc1.subheader(f"Score de liquidité · {n_liq} dernières séances")
@@ -685,7 +803,7 @@ with tabs[3]:
     ).resolve_scale(y="independent").properties(height=280), use_container_width=True)
 
 # ====================================================================== Zoom valeur
-with tabs[4]:
+with tabs[5]:
     choix = st.selectbox("Valeur", sig["Valeur"].tolist())
     r = sig[sig["Valeur"] == choix].iloc[0]
     lq = liq[liq["Valeur"] == choix]
@@ -737,7 +855,7 @@ with tabs[4]:
         st.caption("Le niveau doré concentre le plus de volume : support ou résistance probable.")
 
 # ====================================================================== Blocs
-with tabs[5]:
+with tabs[6]:
     st.subheader("Grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat)")
     bp = blocs[blocs["Date"].isin(periode)]
     st.dataframe(bp, hide_index=True, use_container_width=True,

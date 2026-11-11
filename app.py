@@ -8,11 +8,10 @@ import streamlit as st
 
 from bvc_excel import build_workbook, bulletins_to_frames, merge_history, read_existing
 from bvc_hebdo import charger_composition, donnees_hebdo, libelle_semaine, rapport_word, semaines
-from bvc_indices import (INDICES, composition, lecture, liquidite_indice, serie, tendance_liquidite,
+from bvc_indices import (INDICES, composition, lecture, serie, tendance_liquidite,
                          variation_semaine, volume_indice)
 from bvc_liquidite import ajouter_feuille, liquidite
-from bvc_ilm20 import (BORNE_BAS, BORNE_HAUT, PLAFOND_POIDS, SEMAINES_REF, SEMAINES_REF_MIN, SEUIL_BAS, SEUIL_HAUT,
-                       meteo)
+from bvc_ilm20 import SEMAINES_REF, SEMAINES_REF_MIN, SEUIL_BAS, SEUIL_HAUT
 from bvc_ilm20 import calculer as calculer_ilm
 from bvc_parser import parse_bulletin
 
@@ -253,56 +252,10 @@ st.sidebar.download_button("⬇️ Excel complet", data=xlsx, use_container_widt
 st.sidebar.caption(f"{len(dates)} séance(s) en historique, du {pd.Timestamp(dates[0]):%d/%m} au "
                    f"{pd.Timestamp(dates[-1]):%d/%m/%Y}. Réutilise ce fichier la prochaine fois pour continuer.")
 
-tabs = st.tabs(["🏛️ Indices", "💧 Liquidité MASI 20", "📰 Hebdo MASI 20", "🚦 Signaux", "📋 Classement liquidité", "🔎 Zoom valeur",
-                "🧱 Grosses transactions", "🗺️ Carte du marché", "📊 Marché"])
+tabs = st.tabs(["🏛️ Indices", "💧 Liquidité MASI 20", "📰 Hebdo MASI 20", "📋 Classement liquidité",
+                "🔎 Zoom valeur", "🗺️ Carte du marché", "📊 Marché"])
 
 # ====================================================================== Indices (accueil)
-LIQ_COUL = {"Très liquide": GREEN, "Liquide": "#3E7CB1", "Peu liquide": GOLD, "Illiquide": RED}
-
-
-def classe_score(x):
-    return "Très liquide" if x >= 75 else "Liquide" if x >= 50 else "Peu liquide" if x >= 25 else "Illiquide"
-
-
-def popup_indice(nom, L):
-    """Contenu de la fenêtre d'explication de la liquidité d'un indice."""
-    st.markdown(f"#### Liquidité du {nom} : {fr(L['score'], 0)} / 100")
-    st.markdown(
-        "**Comment on obtient ce chiffre**\n\n"
-        "1. Chaque valeur reçoit un score de liquidité sur 100, fait de 4 ingrédients.\n"
-        f"2. On fait la moyenne de ces scores, **pondérée par le poids de chaque valeur dans le {nom}**.\n\n"
-        "Une grosse valeur peu liquide fait donc baisser la note de l'indice.")
-    ing = pd.DataFrame({
-        "Ingrédient": ["Argent échangé (hors grosses transactions)", "Régularité (jours avec échanges)",
-                       "Écart entre acheteurs et vendeurs", "Coût pour faire bouger le cours"],
-        "Points": [L["ingredients"]["volume"], L["ingredients"]["frequence"], L["ingredients"]["ecart"],
-                   L["ingredients"]["impact"]],
-        "Maximum": [30, 20, 20, 30]})
-    ing["Lbl"] = ing.apply(lambda r: f"{fr(r.Points, 0)} / {r.Maximum}", axis=1)
-    base = alt.Chart(ing).encode(y=alt.Y("Ingrédient:N", sort=None, title=None, axis=alt.Axis(labelLimit=260)))
-    st.altair_chart(alt.layer(
-        base.mark_bar(color="#E3E8F0", cornerRadius=4).encode(x=alt.X("Maximum:Q", title=None, axis=None)),
-        base.mark_bar(color=GOLD, cornerRadius=4).encode(x="Points:Q"),
-        base.mark_text(align="left", dx=4, color=INK).encode(x="Maximum:Q", text="Lbl:N"),
-    ).properties(height=170), use_container_width=True)
-    st.markdown("**Les valeurs qui pèsent le plus dans la note**")
-    det = L["detail"].head(6)
-    st.dataframe(det[["Valeur", "Poids_pct", "Score", "Apport_score"]], hide_index=True, use_container_width=True,
-                 column_config={"Poids_pct": st.column_config.NumberColumn("Poids", format="%.1f %%"),
-                                "Score": st.column_config.NumberColumn("Score valeur", format="%.0f"),
-                                "Apport_score": st.column_config.NumberColumn("Apport à la note", format="%.1f pts")})
-    st.markdown(
-        f"**Coût pour bouger l'indice de 1 %** : {fr(L['cout_1pct'] / 1e6, 0)} M MAD. "
-        "Pour chaque valeur, on calcule combien de MAD il faut échanger pour que son cours bouge de 1 % "
-        "(variation ÷ argent échangé, en médiane sur la période), puis on additionne. "
-        "Plus ce montant est élevé, plus l'indice est profond.")
-    notes = [f"Poids {L['source_poids']} : nombre de titres × cours, sans flottant ni plafonnement."
-             if L["source_poids"] == "approchés" else "Poids officiels issus du fichier de composition."]
-    if L["n_sans_impact"]:
-        notes.append(f"{L['n_sans_impact']} valeur(s) sans échange sur la période comptent pour 0.")
-    st.caption(" ".join(notes))
-
-
 with tabs[0]:
     date = dates[-1]
     st.markdown(f"### Les indices · séance du {pd.Timestamp(date):%d/%m/%Y}")
@@ -338,28 +291,29 @@ with tabs[0]:
 
             if nom != "MASI 20":
                 continue
-            # Liquidité : uniquement pour le MASI 20, avec l'indice de liquidité
+            # Liquidité : uniquement pour le MASI 20, avec le ratio de liquidité
             et = ilm["etat"]
-            if ilm["semaines"] is not None:
-                der = ilm["semaines"].iloc[-1]
+            der = ilm["semaines"].iloc[-1]
+            if et["statut"] != "insuffisant":
                 ico, txt, ton_ = der["Meteo"]
                 prov = " (référence provisoire)" if et["statut"] == "provisoire" else ""
                 st.markdown(
-                    f'<div class="liq"><div class="t">Indice de liquidité · semaine au {pd.Timestamp(der.Fin):%d/%m}{prov}</div>'
+                    f'<div class="liq"><div class="t">Liquidité · semaine au {pd.Timestamp(der.Fin):%d/%m}{prov}</div>'
                     f'<div><span class="sc">{ico} {fr(der.Indice, 0)}</span>'
                     f'<span class="cl" style="color:{MUTED}">{txt}</span></div>'
-                    f'<div class="row"><span>Il faut échanger, pour bouger le MASI 20 de 1 %</span>'
-                    f'<span>{fr(der.Profondeur_MAD / 1e6, 0)} M MAD</span></div></div>', unsafe_allow_html=True)
-                vliq, vliq_txt = der.Indice - 100, "indice de liquidité vs référence"
+                    f'<div class="row"><span>Argent pour bouger le MASI 20 de 1 %</span>'
+                    f'<span>{fr(der.Ratio / 1e6, 0)} M MAD</span></div></div>', unsafe_allow_html=True)
+                vliq = der.Indice - 100
             else:
                 st.markdown(
-                    f'<div class="liq"><div class="t">Indice de liquidité</div>'
-                    f'<div class="row"><span>Historique en construction</span>'
-                    f'<span>{et["seances"]} / {SEMAINES_REF_MIN * 5} séances</span></div></div>', unsafe_allow_html=True)
-                st.caption("L'indice apparaît à partir de 4 semaines de bulletins (référence provisoire), "
-                           "et devient définitif à 12 semaines. Détail dans l'onglet « Liquidité MASI 20 ».")
+                    f'<div class="liq"><div class="t">Liquidité · semaine au {pd.Timestamp(der.Fin):%d/%m}</div>'
+                    f'<div class="row"><span>Argent pour bouger le MASI 20 de 1 %</span>'
+                    f'<span>{"—" if np.isnan(der.Ratio) else fr(der.Ratio / 1e6, 0) + " M MAD"}</span></div>'
+                    f'<div class="row"><span>Indice base 100 (en construction)</span>'
+                    f'<span>{et["seances"]}/{SEMAINES_REF_MIN * 5} séances</span></div></div>',
+                    unsafe_allow_html=True)
                 vol = volume_indice(h, vj, composition(h, nom), dates)
-                vliq, vliq_txt = tendance_liquidite(vol, date)
+                vliq, _ = tendance_liquidite(vol, date)
             titre, phrase, ton = lecture(vs, vliq)
             verdicts.append((nom, titre, phrase, ton, vs, vliq))
 
@@ -409,96 +363,94 @@ with tabs[0]:
 # ====================================================================== Liquidité MASI 20
 with tabs[1]:
     et = ilm["etat"]
-    if ilm["semaines"] is None:
-        st.markdown("### Indice de liquidité du MASI 20 · historique en construction")
-        objectif = SEMAINES_REF_MIN * 5
-        st.progress(min(1.0, et["seances"] / objectif),
-                    text=f"{et['seances']} séance(s) sur {objectif} pour une première référence (provisoire)")
-        st.progress(min(1.0, et["seances"] / (SEMAINES_REF * 5)),
-                    text=f"{et['seances']} séance(s) sur {SEMAINES_REF * 5} pour la référence définitive")
-        st.info("L'indice compare chaque semaine à une **période de référence** (base 100). Il faut au moins "
-                f"{SEMAINES_REF_MIN} semaines de bulletins pour la créer. En attendant, voici les mesures de la semaine.")
-        m_ = ilm["mesures"]
-        dern = m_[m_["Semaine"] == m_["Semaine"].max()]
-        st.metric("Il faut échanger, pour bouger le MASI 20 de 1 %", f"{fr(dern['Resistance'].sum() / 1e6, 0)} M MAD")
-        st.dataframe(dern[["Valeur", "Argent", "Intervenants", "Resistance"]].sort_values("Argent", ascending=False),
-                     hide_index=True, use_container_width=True,
-                     column_config={"Argent": st.column_config.NumberColumn("Argent / séance (MAD)", format="%,.0f"),
-                                    "Intervenants": st.column_config.NumberColumn("Contrats / séance", format="%,.0f"),
-                                    "Resistance": st.column_config.NumberColumn("MAD pour bouger de 1 %", format="%,.0f")})
+    ser = ilm["semaines"]
+    val = ilm["valeurs"]
+    cles_i = list(ser["Semaine"])
+    k_i = st.selectbox("Semaine", cles_i[::-1], key="ilm_sem",
+                       format_func=lambda k: f"Semaine du {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Debut'].iloc[0]):%d/%m} "
+                                             f"au {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Fin'].iloc[0]):%d/%m/%Y}")
+    cur = ser[ser["Semaine"] == k_i].iloc[0]
+
+    # ---- le chiffre principal
+    ratio_txt = "non mesurable" if np.isnan(cur.Ratio) else f"{fr(cur.Ratio / 1e6, 0)} M MAD"
+    if et["statut"] == "insuffisant":
+        ico, txt, ton, ind_txt = "⏳", "Indice en construction", "neutre", ""
     else:
-        ser = ilm["semaines"]
-        det = ilm["detail"]
-        cles_i = list(ser["Semaine"])
-        k_i = st.selectbox("Semaine", cles_i[::-1], key="ilm_sem",
-                           format_func=lambda k: f"Semaine du {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Debut'].iloc[0]):%d/%m} "
-                                                 f"au {pd.Timestamp(ser.set_index('Semaine').loc[[k], 'Fin'].iloc[0]):%d/%m/%Y}")
-        cur = ser[ser["Semaine"] == k_i].iloc[0]
         ico, txt, ton = cur["Meteo"]
-        ref_txt = (f"Référence {'provisoire' if et['statut'] == 'provisoire' else ''} : semaines du "
-                   f"{pd.Timestamp(et['ref_debut']):%d/%m/%Y} au {pd.Timestamp(et['ref_fin']):%d/%m/%Y} = 100")
-        if et["statut"] == "provisoire":
-            st.warning(f"Référence provisoire ({et['semaines']} semaines). Elle sera définitive à {SEMAINES_REF} semaines.")
-        st.markdown(
-            f'<div class="verdict {ton}"><div class="k">Indice de liquidité du MASI 20 · {ref_txt}</div>'
-            f'<div class="h" style="font-size:2.2rem;font-family:\'JetBrains Mono\',monospace">{ico} {fr(cur.Indice, 0)}</div>'
-            f'<div class="p"><b>{txt}.</b> Il faut échanger environ <b>{fr(cur.Profondeur_MAD / 1e6, 0)} M MAD</b> '
-            f'pour faire bouger le MASI 20 de 1 %.</div></div>', unsafe_allow_html=True)
+        ind_txt = f'<span style="font-size:1.1rem;color:{MUTED}"> · indice {fr(cur.Indice, 0)}</span>'
+    st.markdown(
+        f'<div class="verdict {ton}"><div class="k">Combien d\'argent faut-il échanger pour faire bouger le MASI 20 de 1 % ?</div>'
+        f'<div class="h" style="font-size:2rem;font-family:\'JetBrains Mono\',monospace">{ratio_txt}{ind_txt}</div>'
+        f'<div class="p">{ico} <b>{txt}.</b> Cette semaine : {fr(cur.Argent / 1e6, 0)} M MAD échangés sur les 20 valeurs '
+        f'(hors blocs), pour {fr(cur.Mouvement, 2)} % de mouvements cumulés du MASI 20.</div></div>', unsafe_allow_html=True)
 
-        with st.popover("ⓘ La méthode en 5 étapes"):
-            st.markdown("**Étape 1 · trois mesures par action et par semaine** (moyennes par séance)")
-            st.markdown("- **Argent** : volume hors blocs probables\n- **Intervenants** : nombre de contrats\n"
-                        "- **Résistance** : MAD qu'il faut échanger pour faire bouger le cours de 1 % "
-                        "(inverse de la moyenne des ratios journaliers d'Amihud : |variation %| ÷ volume)")
-            st.markdown("**Étape 2 · comparaison à la référence**")
-            st.latex(r"\text{Rapport} = \frac{\text{mesure de la semaine}}{\text{moyenne de la mesure sur la référence}}"
-                     rf"\quad\text{{borné entre }}{BORNE_BAS}\text{{ et }}{BORNE_HAUT:.0f}")
-            st.markdown("**Étape 3 · note de l'action**")
-            st.latex(r"L_i = \sqrt[3]{\text{R}_{\text{argent}} \times \text{R}_{\text{intervenants}} \times \text{R}_{\text{résistance}}}")
-            st.markdown("**Étape 4 · indice du MASI 20**")
-            st.latex(r"\text{Indice} = 100 \times \sum_{i=1}^{20} w_i \times L_i")
-            st.markdown(f"$w_i$ : poids de la valeur dans le MASI 20 ({ilm['source_poids']}), plafonné à "
-                        f"{PLAFOND_POIDS * 100:.0f} %.")
-            st.markdown(f"**Étape 5 · lecture** : 🟢 {SEUIL_HAUT} et plus · 🟡 de {SEUIL_BAS} à {SEUIL_HAUT} · 🔴 moins de {SEUIL_BAS}")
-            ex = det[(det["Semaine"] == k_i)].sort_values("Poids", ascending=False).iloc[0]
-            st.markdown(f"**Exemple, {ex.Valeur}** : rapports {fr(ex.R_argent, 2)} × {fr(ex.R_intervenants, 2)} × "
-                        f"{fr(ex.R_resistance, 2)} → L = {fr(ex.L, 2)} ; poids {fr(ex.Poids * 100, 1)} % → "
-                        f"apport {fr(ex.Contribution, 1)} points.")
+    c1, c2 = st.columns([1, 3])
+    with c1.popover("ⓘ La règle de calcul"):
+        st.markdown("**Une seule règle : l'argent échangé divisé par le mouvement du prix** (ratio de liquidité, dit « ratio Amivest »).")
+        st.latex(r"\text{Ratio} = \frac{\text{argent échangé sur la semaine (MAD, hors blocs)}}"
+                 r"{\sum_{\text{séances}} |\text{variation quotidienne en \%}|}")
+        st.markdown(f"**Cette semaine** : {fr(cur.Argent / 1e6, 1)} M MAD ÷ {fr(cur.Mouvement, 2)} % = "
+                    f"**{ratio_txt} pour 1 %**.")
+        st.markdown("**L'indice (base 100)** compare ce ratio à celui de la période de référence :")
+        st.latex(r"\text{Indice} = 100 \times \frac{\text{ratio de la semaine}}{\text{ratio de la période de référence}}")
+        st.markdown(f"🟢 {SEUIL_HAUT} et plus : plus liquide · 🟡 {SEUIL_BAS} à {SEUIL_HAUT} : habituel · "
+                    f"🔴 moins de {SEUIL_BAS} : moins liquide.")
+        st.caption("Blocs : niveaux de prix d'au moins 5 M MAD avec au moins 1 M MAD par contrat. "
+                   "La somme des variations se fait sans le signe : une baisse de 0,5 % compte comme un mouvement de 0,5 %.")
+    with c2:
+        if et["statut"] == "insuffisant":
+            st.progress(min(1.0, et["seances"] / (SEMAINES_REF_MIN * 5)),
+                        text=f"Indice base 100 : {et['seances']} séance(s) sur {SEMAINES_REF_MIN * 5} pour une première "
+                             f"référence (provisoire), {SEMAINES_REF * 5} pour la définitive")
+        else:
+            st.caption(f"Référence {'provisoire ' if et['statut'] == 'provisoire' else ''}: semaines du "
+                       f"{pd.Timestamp(et['ref_debut']):%d/%m/%Y} au {pd.Timestamp(et['ref_fin']):%d/%m/%Y} = 100 "
+                       f"({fr(et['ratio_ref'] / 1e6, 0)} M MAD pour 1 %).")
 
+    # ---- semaine après semaine
+    if len(ser) > 1:
         st.markdown("#### Semaine après semaine")
-        sp = ser.assign(Semaine_l=ser["Fin"].map(lambda d: f"{pd.Timestamp(d):%d/%m}"),
+        sp = ser.assign(Sem=ser["Fin"].map(lambda d: f"{pd.Timestamp(d):%d/%m}"), M=ser["Ratio"] / 1e6,
                         Statut=np.where(ser["Dans_reference"], "Semaine de référence", "Après la référence"))
-        band = alt.Chart(pd.DataFrame({"y": [SEUIL_BAS], "y2": [SEUIL_HAUT]})).mark_rect(color="#F3E6C0", opacity=.5).encode(
-            y="y:Q", y2="y2:Q")
-        rule = alt.Chart(pd.DataFrame({"y": [100]})).mark_rule(color=MUTED, strokeDash=[4, 4]).encode(y="y:Q")
-        ln = alt.Chart(sp).mark_line(color=INK, strokeWidth=2.5).encode(
-            x=alt.X("Semaine_l:N", sort=None, title="Semaine se terminant le", axis=alt.Axis(labelAngle=0)),
-            y=alt.Y("Indice:Q", title="Indice de liquidité", scale=alt.Scale(zero=False)))
-        pts = alt.Chart(sp).mark_circle(size=90, stroke="#fff", strokeWidth=1).encode(
-            x=alt.X("Semaine_l:N", sort=None), y="Indice:Q",
+        bars = alt.Chart(sp).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4, size=26).encode(
+            x=alt.X("Sem:N", sort=None, title="Semaine se terminant le", axis=alt.Axis(labelAngle=0)),
+            y=alt.Y("M:Q", title="M MAD pour bouger le MASI 20 de 1 %"),
             color=alt.Color("Statut:N", scale=alt.Scale(domain=["Semaine de référence", "Après la référence"],
-                                                        range=["#9FB0C8", GOLD]), legend=alt.Legend(orient="top", title=None)),
-            tooltip=[alt.Tooltip("Semaine_l", title="Semaine au"), alt.Tooltip("Indice", format=".1f"),
-                     alt.Tooltip("Profondeur_MAD", title="MAD pour 1 %", format=",.0f")])
-        st.altair_chart((band + rule + ln + pts).properties(height=280), use_container_width=True)
-        st.caption(f"Bande dorée : zone « habituelle » ({SEUIL_BAS} à {SEUIL_HAUT}). Points gris : semaines qui forment la "
-                   "référence (elles tournent autour de 100 par construction).")
+                                                        range=["#9FB0C8", INK]), legend=alt.Legend(orient="top", title=None)),
+            tooltip=[alt.Tooltip("Sem", title="Semaine au"), alt.Tooltip("M", title="M MAD pour 1 %", format=",.0f"),
+                     alt.Tooltip("Indice", format=".0f")])
+        layers = [bars]
+        if et["statut"] != "insuffisant":
+            layers.append(alt.Chart(pd.DataFrame({"y": [et["ratio_ref"] / 1e6]})).mark_rule(
+                color=GOLD, strokeDash=[6, 4], strokeWidth=2).encode(y="y:Q"))
+        st.altair_chart(alt.layer(*layers).properties(height=260), use_container_width=True)
+        if et["statut"] != "insuffisant":
+            st.caption("Ligne dorée : ratio de la période de référence (= indice 100).")
 
-        st.markdown("#### Les 20 valeurs cette semaine")
-        dd = det[det["Semaine"] == k_i].sort_values("Contribution", ascending=False)
-        dd = dd.assign(Poids=dd["Poids"] * 100)
-        st.dataframe(dd[["Valeur", "Poids", "R_argent", "R_intervenants", "R_resistance", "L", "Contribution"]],
-                     hide_index=True, use_container_width=True, height=560,
-                     column_config={
-                         "Poids": st.column_config.NumberColumn("Poids", format="%.1f %%"),
-                         "R_argent": st.column_config.NumberColumn("Argent vs réf.", format="%.2f"),
-                         "R_intervenants": st.column_config.NumberColumn("Intervenants vs réf.", format="%.2f"),
-                         "R_resistance": st.column_config.NumberColumn("Résistance vs réf.", format="%.2f"),
-                         "L": st.column_config.NumberColumn("Note L", format="%.2f"),
-                         "Contribution": st.column_config.ProgressColumn("Apport à l'indice (points)", format="%.1f",
-                                                                         min_value=0, max_value=float(dd["Contribution"].max()))})
-        st.caption("1,00 = comme pendant la référence · au-dessus : plus liquide · en dessous : moins liquide. "
-                   "Le poids est affiché en %, la somme des apports donne l'indice.")
+    # ---- les 20 valeurs
+    st.markdown("#### Les 20 valeurs : par où le MASI 20 peut-il bouger ?")
+    vv = val[val["Semaine"] == k_i].copy()
+    vv["Poids_pct"] = vv["Poids"] * 100
+    vv["Ratio_M"] = vv["Ratio"] / 1e6
+    vv["Cout_M"] = vv["Cout_via_valeur"] / 1e6
+    vv = vv.sort_values("Cout_M", na_position="last")
+    cols_v = ["Statut", "Valeur", "Poids_pct", "Ratio_M", "Cout_M"]
+    cfg = {"Statut": st.column_config.TextColumn("État"),
+           "Poids_pct": st.column_config.NumberColumn("Poids", format="%.1f %%", help="Poids dans le MASI 20"),
+           "Ratio_M": st.column_config.NumberColumn("Ratio valeur (M MAD)", format="%.1f",
+                                                    help="M MAD à échanger pour faire bouger le cours de la valeur de 1 %"),
+           "Cout_M": st.column_config.NumberColumn("Coût via la valeur (M MAD)", format="%.0f",
+                                                   help="M MAD à échanger pour faire bouger le MASI 20 de 1 % à travers "
+                                                        "cette seule valeur = ratio ÷ poids")}
+    if et["statut"] != "insuffisant":
+        vv["Vs_ref"] = vv["Vs_ref_pct"].map(lambda x: "—" if pd.isna(x) else ("▲ " if x >= 10 else "▼ " if x <= -10 else "= ") + pct(x, 0))
+        cols_v.insert(4, "Vs_ref")
+        cfg["Vs_ref"] = st.column_config.TextColumn("vs référence", help="Ratio de la valeur cette semaine comparé à son ratio pendant la période de référence")
+    st.dataframe(vv[cols_v], hide_index=True, use_container_width=True, height=740, column_config=cfg)
+    st.caption("Lecture : pour bouger le MASI 20 de 1 % à travers une seule valeur, son cours doit bouger de "
+               "(1 ÷ son poids) %, ce qui coûte son ratio ÷ son poids. 🔴 Point faible : moins du quart de l'argent "
+               "nécessaire pour bouger tout l'indice · 🟡 moins de la moitié · 🟢 au-delà. Poids "
+               f"{ilm['source_poids']}.")
 
 # ====================================================================== Hebdo MASI 20
 with tabs[2]:
@@ -585,7 +537,7 @@ with tabs[2]:
             st.markdown("\n".join(f"- {m}" for m in R["surveiller"]) or "Rien de particulier.")
             with st.expander("Détail des valeurs"):
                 st.dataframe(T[["Valeur", "Secteur", "Poids_pct", "Var_semaine_pct", "Contribution_pct", "Volume_MAD",
-                                "Part_volume_pct", "Volume_vs_poids", "Tendance_volume", "Score_liquidite", "Signal"]],
+                                "Part_volume_pct", "Volume_vs_poids", "Tendance_volume", "Ratio_liquidite", "Signal"]],
                              hide_index=True, use_container_width=True,
                              column_config={"Poids_pct": st.column_config.NumberColumn("Poids", format="%.1f %%"),
                                             "Var_semaine_pct": st.column_config.NumberColumn("Var.", format="%+.2f %%"),
@@ -594,10 +546,10 @@ with tabs[2]:
                                             "Part_volume_pct": st.column_config.NumberColumn("Part du volume", format="%.1f %%"),
                                             "Volume_vs_poids": st.column_config.NumberColumn("Volume / poids", format="%.1f×"),
                                             "Tendance_volume": st.column_config.NumberColumn("Tend. vol.", format="%.2f×"),
-                                            "Score_liquidite": st.column_config.NumberColumn("Liquidité", format="%.0f")})
+                                            "Ratio_liquidite": st.column_config.NumberColumn("MAD pour 1 %", format="%,.0f")})
 
 # ====================================================================== Carte du marché
-with tabs[7]:
+with tabs[5]:
     a, b = st.columns([3, 1])
     with a:
         seance = st.select_slider("Séance", options=dates, value=dates[-1],
@@ -621,7 +573,7 @@ with tabs[7]:
                "Les plus grandes tuiles concentrent le volume.")
 
 # ====================================================================== Marché
-with tabs[8]:
+with tabs[6]:
     a, b = st.columns(2)
     with a:
         st.subheader("Volume du marché par séance")
@@ -659,127 +611,48 @@ with tabs[8]:
         use_container_width=True)
     st.caption("Une couleur dominante = pic ponctuel (souvent un bloc), pas un intérêt régulier.")
 
-# ====================================================================== Signaux
+# ====================================================================== Classement liquidité
 with tabs[3]:
-    st.subheader(f"Signaux prix / volume sur {nb} séances")
-    counts = sig["Signal"].value_counts()
-    emo = {"Hausse confirmée": "🟢", "Baisse sous volume": "🔴", "Hausse sans volume": "🟡",
-           "Baisse sans volume": "🟠", "Absorption": "🔵"}
-    st.markdown(" &nbsp; ".join(f"{emo.get(k, '⚪')} **{k}** : {v}" for k, v in counts.items()))
-    filtre = st.multiselect("Filtrer par signal", sorted(sig["Signal"].unique()))
-    s = sig[sig["Signal"].isin(filtre)] if filtre else sig
-    s = s.assign(Signal=s["Signal"].map(lambda x: f"{emo.get(x, '⚪')} {x}"))
-    st.dataframe(
-        s[["Valeur", "Secteur", "Volume_periode_MAD", "Part_periode_pct", "Var_periode_pct", "Tendance_volume",
-           "Pic_vs_mediane", "Ratio_dernier_jour_vs_moy20", "Ticket_moyen", "Flux", "Signal"]],
-        hide_index=True, use_container_width=True, height=520,
-        column_config={
-            "Volume_periode_MAD": st.column_config.NumberColumn("Volume (MAD)", format="%,.0f"),
-            "Part_periode_pct": st.column_config.ProgressColumn("Part", format="%.1f %%", min_value=0,
-                                                                 max_value=float(max(1, sig["Part_periode_pct"].max()))),
-            "Var_periode_pct": st.column_config.NumberColumn("Var. période", format="%+.1f %%"),
-            "Tendance_volume": st.column_config.NumberColumn("Tendance vol.", format="%.2f×"),
-            "Pic_vs_mediane": st.column_config.NumberColumn("Pic", format="%.1f×"),
-            "Ratio_dernier_jour_vs_moy20": st.column_config.NumberColumn("Dernier jour / moy. 20", format="%.1f×"),
-            "Ticket_moyen": st.column_config.NumberColumn("Ticket moyen", format="%,.0f"),
-        })
-    with st.expander("Comment lire les signaux"):
-        st.markdown(
-            "- 🟢 **Hausse confirmée** : le cours monte (≥ +2 %) et le volume augmente (≥ +20 %).\n"
-            "- 🟡 **Hausse sans volume** : le cours monte mais l'activité baisse, la hausse est fragile.\n"
-            "- 🔴 **Baisse sous volume** : le cours baisse et le volume grossit, pression vendeuse réelle.\n"
-            "- 🔵 **Absorption** : gros volume (≥ 20 M MAD) et prix quasi immobile (< 1 %).\n"
-            "- **Tendance vol.** : moyenne de la 2ᵉ moitié de la période ÷ moyenne de la 1ʳᵉ moitié.\n"
-            "- **Pic** : plus forte séance ÷ séance médiane. **Dernier jour / moy. 20** : fiable à partir de ~20 séances.\n"
-            "- **Flux** : ticket moyen ≥ 250 000 MAD = institutionnel, ≤ 60 000 MAD = particuliers.")
-
-# ====================================================================== Liquidité
-with tabs[4]:
     n_liq = min(nb_liq, len(dates))
     hc1, hc2 = st.columns([3, 1])
-    hc1.subheader(f"Score de liquidité · {n_liq} dernières séances")
-    with hc2.popover("ⓘ La formule, valeur par valeur", use_container_width=True):
-        v_ = st.selectbox("Valeur", liq["Valeur"].tolist(), key="liq_formule")
-        x_ = liq[liq["Valeur"] == v_].iloc[0]
-        st.markdown(f"#### {v_} : {fr(x_.Score, 0)} / 100 · {x_.Classe}")
-        st.markdown("On classe toutes les valeurs sur 4 ingrédients. Être le meilleur sur un ingrédient donne "
-                    "tous ses points, être le dernier n'en donne presque aucun. **Score = somme des points.**")
-        ing_ = pd.DataFrame({
-            "Ingrédient": ["Argent échangé / jour (hors grosses transactions)", "Régularité",
-                           "Écart acheteurs / vendeurs", "Coût pour faire bouger le cours"],
-            "Mesure": [mm(x_.Volume_fond_median) + " MAD", f"{fr(x_.Frequence_pct, 0)} % des séances",
-                       "—" if np.isnan(x_.Ecart_median_pct) else f"{fr(x_.Ecart_median_pct, 2)} %",
-                       "—" if np.isnan(x_.MAD_pour_1pct_impact) else mm(x_.MAD_pour_1pct_impact) + " MAD pour 1 %"],
-            "Points": [x_.Pts_volume, x_.Pts_frequence, x_.Pts_ecart, x_.Pts_impact],
-            "Maximum": [30, 20, 20, 30]})
-        ing_["Lbl"] = ing_.apply(lambda r: f"{fr(r.Points, 0)} / {r.Maximum}", axis=1)
-        b_ = alt.Chart(ing_).encode(y=alt.Y("Ingrédient:N", sort=None, title=None, axis=alt.Axis(labelLimit=280)))
-        st.altair_chart(alt.layer(
-            b_.mark_bar(color="#E3E8F0", cornerRadius=4).encode(x=alt.X("Maximum:Q", axis=None)),
-            b_.mark_bar(color=GOLD, cornerRadius=4).encode(x="Points:Q"),
-            b_.mark_text(align="left", dx=4, color=INK).encode(x="Maximum:Q", text="Lbl:N"),
-        ).properties(height=170), use_container_width=True)
-        st.dataframe(ing_[["Ingrédient", "Mesure", "Points"]], hide_index=True, use_container_width=True,
-                     column_config={"Points": st.column_config.NumberColumn(format="%.1f")})
-        st.caption("Régularité : part des séances où la valeur a été échangée. Écart : (meilleure offre − meilleure "
-                   "demande) ÷ milieu, à la clôture. Coût pour faire bouger le cours : argent qu'il faut échanger pour "
-                   "que le cours varie de 1 % (médiane sur la période). Grosses transactions : au moins 5 M MAD et "
-                   "1 M MAD par contrat.")
+    hc1.subheader(f"Classement de liquidité · {n_liq} dernières séances")
+    with hc2.popover("ⓘ La règle de calcul", use_container_width=True):
+        st.markdown("La même règle que pour le MASI 20, appliquée à chaque action :")
+        st.latex(r"\text{Ratio} = \frac{\text{argent échangé (MAD, hors blocs)}}{\sum |\text{variation quotidienne en \%}|}")
+        st.markdown("On lit : **combien de MAD il faut échanger pour faire bouger le cours de 1 %**. "
+                    "Plus le ratio est élevé, plus l'action est liquide. Le classement va du plus élevé au plus faible.")
+        ex = liq.dropna(subset=["Ratio_MAD"]).iloc[0]
+        st.markdown(f"Exemple, **{ex.Valeur}** : {fr(ex.Argent_MAD / 1e6, 1)} M MAD ÷ {fr(ex.Mouvement_pct, 2)} % = "
+                    f"**{fr(ex.Ratio_MAD / 1e6, 1)} M MAD pour 1 %**.")
+        st.caption("Une action n'est classée que si elle a été échangée au moins une séance sur deux : sinon, un seul "
+                   "échange sans mouvement de prix donnerait un ratio artificiellement élevé.")
     if n_liq < 20:
-        st.warning(f"Seulement {n_liq} séance(s) d'historique : le score se stabilise à partir de 20 séances.")
-    classes = liq["Classe"].value_counts()
-    st.markdown('<div class="kpis">' +
-                kpi("Très liquides", str(classes.get("Très liquide", 0)), "score ≥ 75", gold=True) +
-                kpi("Liquides", str(classes.get("Liquide", 0)), "score 50 à 75") +
-                kpi("Peu liquides", str(classes.get("Peu liquide", 0)), "score 25 à 50") +
-                kpi("Illiquides", str(classes.get("Illiquide", 0)), "score < 25") +
-                kpi("Largeur du marché", f"{fr(lm.Largeur_pct, 0)} %", "des valeurs traitées, dernière séance") +
-                '</div>', unsafe_allow_html=True)
-    a, b = st.columns([3, 2])
-    with a:
-        st.dataframe(
-            liq[["Rang", "Valeur", "Secteur", "Score", "Classe", "Volume_fond_median", "Frequence_pct",
-                 "Ecart_median_pct", "Amihud_median", "MAD_pour_1pct_impact", "Part_blocs_pct"]],
-            hide_index=True, use_container_width=True, height=560,
-            column_config={
-                "Score": st.column_config.ProgressColumn("Score", format="%.0f", min_value=0, max_value=100),
-                "Volume_fond_median": st.column_config.NumberColumn("Volume de fond / jour", format="%,.0f"),
-                "Frequence_pct": st.column_config.NumberColumn("Fréquence", format="%.0f %%"),
-                "Ecart_median_pct": st.column_config.NumberColumn("Écart achat/vente", format="%.2f %%"),
-                "Amihud_median": st.column_config.NumberColumn("Impact (% / M MAD)", format="%.3f"),
-                "MAD_pour_1pct_impact": st.column_config.NumberColumn("MAD pour bouger de 1 %", format="%,.0f"),
-                "Part_blocs_pct": st.column_config.NumberColumn("Part des blocs", format="%.0f %%"),
-            })
-    with b:
-        sc = liq.dropna(subset=["Amihud_median"])
-        sc = sc[(sc["Volume_fond_median"] > 0) & (sc["Amihud_median"] > 0)]
-        st.altair_chart(alt.Chart(sc).mark_circle(size=90, opacity=.85, stroke="#fff", strokeWidth=1).encode(
-            x=alt.X("Volume_fond_median:Q", scale=alt.Scale(type="log"), title="Volume de fond / jour (MAD, log)"),
-            y=alt.Y("Amihud_median:Q", scale=alt.Scale(type="log", reverse=True), title="Impact prix (log, haut = faible)"),
-            color=alt.Color("Classe:N", scale=alt.Scale(domain=["Très liquide", "Liquide", "Peu liquide", "Illiquide"],
-                                                        range=[GREEN, "#3E7CB1", GOLD, RED]),
-                            legend=alt.Legend(orient="bottom", title=None)),
-            tooltip=["Valeur", alt.Tooltip("Score", format=".0f"), alt.Tooltip("Volume_fond_median", title="Volume de fond", format=",.0f"),
-                     alt.Tooltip("Amihud_median", title="Impact", format=".3f"),
-                     alt.Tooltip("MAD_pour_1pct_impact", title="MAD pour 1 %", format=",.0f")]
-        ).properties(height=430, title="Volume et impact"), use_container_width=True)
-        st.caption("En haut à droite : beaucoup de volume et peu d'impact, c'est-à-dire facile à traiter. "
-                   "En bas à gauche : un petit montant suffit à faire bouger le cours.")
-    st.subheader("Liquidité du marché séance par séance")
-    lmm = liq_m.assign(Seance=liq_m["Date"].dt.strftime("%d/%m"))
-    base = alt.Chart(lmm).encode(x=alt.X("Seance:N", sort=None, title=None))
-    st.altair_chart(alt.layer(
-        base.mark_bar(color=INK, opacity=.85, cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
-            y=alt.Y("Volume_fond:Q", title="Volume de fond (MAD)", axis=alt.Axis(format="~s"))),
-        base.mark_line(color=GOLD, strokeWidth=3, point=True).encode(
-            y=alt.Y("Largeur_pct:Q", title="Valeurs traitées (%)", scale=alt.Scale(domain=[0, 100])),
-            tooltip=["Seance", alt.Tooltip("Volume_fond", title="Volume de fond", format=",.0f"),
-                     alt.Tooltip("Valeurs_traitees", title="Valeurs traitées"),
-                     alt.Tooltip("Ecart_median_pct", title="Écart médian %", format=".2f")])
-    ).resolve_scale(y="independent").properties(height=280), use_container_width=True)
+        st.caption(f"Calculé sur {n_liq} séance(s). Le classement est plus stable à partir de 20 séances.")
+    cl = liq.assign(Ratio_M=liq["Ratio_MAD"] / 1e6, Argent_M=liq["Argent_par_seance"] / 1e6,
+                    Regularite=liq["Seances_echangees"].astype(int).astype(str) + " / " + liq["Seances"].astype(str))
+    st.dataframe(cl[["Rang", "Valeur", "Secteur", "Ratio_M", "Argent_M", "Mouvement_pct", "Regularite", "Mesure"]],
+                 hide_index=True, use_container_width=True, height=520,
+                 column_config={
+                     "Rang": st.column_config.NumberColumn(format="%d"),
+                     "Ratio_M": st.column_config.NumberColumn("M MAD pour 1 %", format="%.2f",
+                                                              help="Argent à échanger pour faire bouger le cours de 1 %"),
+                     "Argent_M": st.column_config.NumberColumn("Argent / séance (M MAD)", format="%.2f"),
+                     "Mouvement_pct": st.column_config.NumberColumn("Mouvements cumulés", format="%.2f %%"),
+                     "Regularite": st.column_config.TextColumn("Séances échangées"),
+                     "Mesure": st.column_config.TextColumn("Remarque")})
+    top = cl.dropna(subset=["Ratio_M"]).head(25)
+    base_c = alt.Chart(top).encode(
+        y=alt.Y("Valeur:N", sort=alt.EncodingSortField("Ratio_M", order="descending"), title=None),
+        x=alt.X("Ratio_M:Q", title="M MAD pour faire bouger le cours de 1 % (échelle logarithmique)",
+                scale=alt.Scale(type="log")),
+        tooltip=["Valeur", alt.Tooltip("Ratio_M", title="M MAD pour 1 %", format=",.2f"),
+                 alt.Tooltip("Argent_M", title="Argent / séance (M MAD)", format=",.2f")])
+    st.altair_chart((base_c.mark_circle(size=140, color=INK, opacity=1)
+                     + base_c.mark_text(align="left", dx=10, color=INK).encode(text=alt.Text("Ratio_M:Q", format=",.1f")))
+                    .properties(height=560, title="Les 25 actions les plus liquides"), use_container_width=True)
 
 # ====================================================================== Zoom valeur
-with tabs[5]:
+with tabs[4]:
     choix = st.selectbox("Valeur", sig["Valeur"].tolist())
     r = sig[sig["Valeur"] == choix].iloc[0]
     lq = liq[liq["Valeur"] == choix]
@@ -789,7 +662,9 @@ with tabs[5]:
                     "up" if r["Var_periode_pct"] >= 0 else "dn") +
                 kpi("Ticket moyen", fr(r["Ticket_moyen"] / 1e3, 0) + " k", r["Flux"]) +
                 kpi("Signal", r["Signal"], "", txt=True) +
-                (kpi("Liquidité", fr(lq["Score"].iloc[0], 0) + " / 100", lq["Classe"].iloc[0]) if len(lq) else "") +
+                (kpi("Liquidité", (fr(lq["Ratio_MAD"].iloc[0] / 1e6, 1) + " M MAD") if pd.notna(lq["Ratio_MAD"].iloc[0]) else "—",
+                     (f"pour bouger le cours de 1 % · rang {int(lq['Rang'].iloc[0])}" if pd.notna(lq["Rang"].iloc[0])
+                      else lq["Mesure"].iloc[0])) if len(lq) else "") +
                 '</div>', unsafe_allow_html=True)
     a, b = st.columns(2)
     with a:
@@ -829,19 +704,6 @@ with tabs[5]:
             color=alt.Color("Niveau:N", scale=alt.Scale(domain=["Le plus chargé", "Autres"], range=[GOLD, INK]), legend=None),
             tooltip=["Prix", alt.Tooltip("M", title="M MAD", format=",.2f")]), use_container_width=True)
         st.caption("Le niveau doré concentre le plus de volume : support ou résistance probable.")
-
-# ====================================================================== Blocs
-with tabs[6]:
-    st.subheader("Grosses transactions (≥ 5 M MAD et ≥ 1 M MAD par contrat)")
-    bp = blocs[blocs["Date"].isin(periode)]
-    st.dataframe(bp, hide_index=True, use_container_width=True,
-                 column_config={"Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
-                                "Volume_MAD": st.column_config.NumberColumn(format="%,.0f"),
-                                "MAD_par_contrat": st.column_config.NumberColumn(format="%,.0f"),
-                                "Part_du_jour_pct": st.column_config.ProgressColumn("Part du jour", format="%.0f %%",
-                                                                                     min_value=0, max_value=100),
-                                "Prix_vs_cloture_pct": st.column_config.NumberColumn(format="%+.2f %%")})
-    st.caption("Un bloc payé au-dessus de la clôture montre un acheteur décidé ; en dessous, un vendeur pressé.")
 
 st.markdown('<div class="foot">Outil indépendant, non affilié à la Bourse de Casablanca. '
             'Données issues des bulletins de la cote publics. Ne constitue pas un conseil en investissement.</div>',

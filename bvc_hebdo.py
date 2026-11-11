@@ -22,6 +22,7 @@ from docx.oxml.ns import qn  # noqa: E402
 from docx.shared import Cm, Pt, RGBColor  # noqa: E402
 
 from bvc_excel import _signal  # noqa: E402
+from bvc_liquidite import volume_fond_jour  # noqa: E402
 
 NAVY, GOLD, GREEN, RED, GREY = "0B1F3A", "C8A24A", "12A150", "D9483B", "6B7A90"
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
@@ -114,6 +115,8 @@ def donnees_hebdo(h, vj, liq, compo, jours, jours_prec=None):
         vp = vj[vj["Date"].isin(jours_prec) & vj["Valeur"].isin(noms)]
         vol_prec = vp.groupby("Valeur")["Volume_MAD"].sum().to_dict()
     blocs_semaine = []
+    _f = volume_fond_jour(h, jours)
+    fond_sem = _f.groupby("Valeur")["Volume_fond"].sum().to_dict()
     for v in noms:
         g = d[d["Valeur"] == v].sort_values("Date")
         if g.empty:
@@ -131,7 +134,8 @@ def donnees_hebdo(h, vj, liq, compo, jours, jours_prec=None):
         else:
             tendance = vv[k:].mean() / vv[:k].mean() if len(vv) > 1 and vv[:k].mean() > 0 else np.nan
         w = float(poids.get(v, 0))
-        lq = liq[liq["Valeur"] == v]
+        argent = fond_sem.get(v, 0.0)
+        mouv = g["Var_pct"].abs().sum()
         rows.append({
             "Valeur": v, "Secteur": g["Secteur_nom"].iloc[-1], "Poids_pct": w * 100,
             "Cloture": close, "Var_semaine_pct": r, "Contribution_pct": contrib,
@@ -139,7 +143,7 @@ def donnees_hebdo(h, vj, liq, compo, jours, jours_prec=None):
             "Volume_MAD": vol, "Tendance_volume": tendance,
             "Ticket_moyen": vol / g["Contrats"].sum() if g["Contrats"].sum() else np.nan,
             "Signal": _signal(r, tendance, vol),
-            "Score_liquidite": lq["Score"].iloc[0] if len(lq) else np.nan,
+            "Ratio_liquidite": argent / mouv if mouv > 0 and argent > 0 else np.nan,
             "Plus_haut_annuel": g["Plus_haut_annuel"].iloc[-1],
         })
     t = pd.DataFrame(rows)
@@ -461,7 +465,8 @@ def rapport_word(data):
     # ---- tableau
     doc.add_page_break()
     _titre(doc, "Détail des 20 valeurs (triées par contribution)")
-    cols = ["Valeur", "Poids", "Var. sem.", "Contrib. (pb)", "Volume (M MAD)", "Vol./poids", "Tend. vol.", "Liquidité", "Signal"]
+    cols = ["Valeur", "Poids", "Var. sem.", "Contrib. (pb)", "Volume (M MAD)", "Vol./poids", "Tend. vol.",
+            "M MAD pour 1 %", "Signal"]
     tab = doc.add_table(rows=1, cols=len(cols))
     tab.alignment = WD_TABLE_ALIGNMENT.CENTER
     tab.style = "Table Grid"
@@ -474,7 +479,7 @@ def rapport_word(data):
         vals = [x.Valeur, _fr(x.Poids_pct, 1) + " %", _pct(x.Var_semaine_pct, 1), _fr(x.Contribution_pct * 100, 1),
                 _fr(x.Volume_MAD / 1e6, 1), _fr(x.Volume_vs_poids, 1) + "×",
                 "—" if np.isnan(x.Tendance_volume) else _fr(x.Tendance_volume, 2) + "×",
-                "—" if np.isnan(x.Score_liquidite) else _fr(x.Score_liquidite, 0), x.Signal]
+                "—" if np.isnan(x.Ratio_liquidite) else _fr(x.Ratio_liquidite / 1e6, 1), x.Signal]
         for j, v in enumerate(vals):
             color = None
             if j in (2, 3):
@@ -519,7 +524,8 @@ def rapport_word(data):
         "Vol./poids = part du volume de l'indice ÷ poids. Au-dessus de 1, la valeur attire plus d'argent que son poids. "
         "Tend. vol. = volume moyen de la semaine ÷ semaine précédente (à défaut, 2ᵉ moitié ÷ 1ʳᵉ moitié de la semaine).",
         "Grosses transactions : niveaux de prix d'au moins 5 M MAD et 1 M MAD par contrat. "
-        "Liquidité : score de 0 à 100 (volume hors blocs, fréquence, écart achat/vente, impact prix).",
+        "M MAD pour 1 % : ratio de liquidité de la valeur sur la semaine = argent échangé hors blocs ÷ somme des "
+        "variations quotidiennes du cours (sans le signe). Plus il est élevé, plus la valeur est liquide.",
         "Source : bulletins de la cote. Outil indépendant, non affilié à la Bourse de Casablanca. "
         "Ce document ne constitue pas un conseil en investissement.",
     ]
